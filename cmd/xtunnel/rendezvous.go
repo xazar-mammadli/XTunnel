@@ -28,6 +28,7 @@ type rendezvousFlags struct {
 	pairTimeout     time.Duration
 	includeLoopback bool
 	forceRelay      bool
+	retry           bool
 }
 
 func (r *rendezvousFlags) register(fs *flag.FlagSet) {
@@ -37,6 +38,7 @@ func (r *rendezvousFlags) register(fs *flag.FlagSet) {
 	fs.DurationVar(&r.pairTimeout, "pair-timeout", 10*time.Minute, "how long to wait for the peer")
 	fs.BoolVar(&r.includeLoopback, "include-loopback", false, "gather loopback candidates (same-machine testing)")
 	fs.BoolVar(&r.forceRelay, "force-relay", false, "use only relay candidates (testing the TURN fallback path)")
+	fs.BoolVar(&r.retry, "retry", true, "keep the rendezvous connection open and auto-reconnect if the tunnel drops")
 }
 
 func (r *rendezvousFlags) stunServers() []string {
@@ -45,6 +47,13 @@ func (r *rendezvousFlags) stunServers() []string {
 	}
 	return defaultSTUN
 }
+
+// reconnect pacing for non-interactive rounds after the initial pairing.
+const (
+	reconnectTimeout = 45 * time.Second
+	reconnectDelay   = 2 * time.Second
+	keepaliveEvery   = 25 * time.Second
+)
 
 func runHost(args []string) error {
 	fs := flag.NewFlagSet("host", flag.ExitOnError)
@@ -80,21 +89,17 @@ func runHost(args []string) error {
 	log.Printf("waiting for peer (up to %s)...", rf.pairTimeout)
 
 	wctx, wcancel := context.WithTimeout(ctx, rf.pairTimeout)
-	defer wcancel()
-	if err := mb.WaitPeer(wctx); err != nil {
+	err = mb.WaitPeer(wctx)
+	wcancel()
+	if err != nil {
 		return fmt.Errorf("waiting for peer: %w", err)
 	}
 	log.Printf("peer joined, authenticating...")
 
-	sess, ep, err := rendezvousConnect(wctx, mb, code, true, &rf)
-	if err != nil {
-		return err
+	serve := func(ctx context.Context, s *peer.Session) error {
+		return serveAsHost(ctx, s, expose)
 	}
-	defer ep.Close()
-	printPath(ep)
-	// Signaling is finished; the tunnel lives on without the server.
-	_ = mb.Close()
-	return serveAsHost(ctx, sess, expose)
+	return runRendezvousLoop(ctx, mb, code, true, &rf, serve)
 }
 
 func runJoin(args []string) error {
@@ -139,39 +144,41 @@ func runJoin(args []string) error {
 	}
 	log.Printf("joined room, authenticating...")
 
-	wctx, wcancel := context.WithTimeout(ctx, rf.pairTimeout)
-	defer wcancel()
-	sess, ep, err := rendezvousConnect(wctx, mb, code, false, &rf)
-	if err != nil {
-		return err
+	serve := func(ctx context.Context, s *peer.Session) error {
+		return serveAsJoiner(ctx, s, forwards)
 	}
-	defer ep.Close()
-	printPath(ep)
-	_ = mb.Close()
-	return serveAsJoiner(ctx, sess, forwards)
+	return runRendezvousLoop(ctx, mb, code, false, &rf, serve)
 }
 
-// rendezvousConnect runs PAKE, the encrypted signaling exchange, trickle ICE
-// and the QUIC handshake. The host is ICE-controlling and the QUIC client.
-func rendezvousConnect(
+// rendezvousLoop holds the state reused across (re)connection rounds.
+type rendezvousLoop struct {
+	sc     *sig.SecureChannel
+	rf     *rendezvousFlags
+	turns  []icewrap.TURNServer
+	isHost bool
+}
+
+// runRendezvousLoop performs the PAKE once, then repeatedly establishes the
+// tunnel and serves it. If retry is enabled it reconnects over the same
+// rendezvous mailbox whenever the QUIC connection drops, until the user
+// interrupts.
+func runRendezvousLoop(
 	ctx context.Context,
 	mb *sig.Mailbox,
 	code string,
 	isHost bool,
 	rf *rendezvousFlags,
-) (*peer.Session, *icewrap.Endpoint, error) {
+	serve func(context.Context, *peer.Session) error,
+) error {
 	sc, err := sig.Secure(ctx, mb, code, isHost)
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 
-	cert, fp, err := xcrypto.GenerateCert()
-	if err != nil {
-		return nil, nil, err
-	}
+	// Keep the mailbox alive for the tunnel's lifetime so reconnect signaling
+	// keeps working across long idle periods.
+	go mb.Keepalive(ctx, keepaliveEvery)
 
-	// Combine user-supplied TURN relays with any the server issued during
-	// CreateRoom/JoinRoom (the relay fallback path).
 	turns := append([]icewrap.TURNServer(nil), rf.turn...)
 	for _, t := range mb.TURNServers() {
 		turns = append(turns, icewrap.TURNServer{URL: t.URL, Username: t.Username, Password: t.Password})
@@ -180,11 +187,67 @@ func rendezvousConnect(
 		log.Printf("relay fallback available via server-issued TURN credentials")
 	}
 
+	rl := &rendezvousLoop{sc: sc, rf: rf, turns: turns, isHost: isHost}
+
+	first := true
+	for {
+		roundTimeout := reconnectTimeout
+		if first {
+			roundTimeout = rf.pairTimeout
+		}
+		rctx, rcancel := context.WithTimeout(ctx, roundTimeout)
+		sess, ep, err := rl.round(rctx)
+		rcancel()
+
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil // user interrupted
+			}
+			if first || !rf.retry {
+				return err
+			}
+			log.Printf("reconnect failed: %v — retrying in %s", err, reconnectDelay)
+			if !sleepCtx(ctx, reconnectDelay) {
+				return nil
+			}
+			continue
+		}
+		if !first {
+			log.Printf("reconnected")
+		}
+		first = false
+		printPath(ep)
+
+		serveErr := serve(ctx, sess)
+		_ = ep.Close()
+
+		if ctx.Err() != nil {
+			return nil
+		}
+		if !rf.retry {
+			return serveErr
+		}
+		log.Printf("tunnel dropped — reconnecting over the rendezvous server...")
+		if !sleepCtx(ctx, reconnectDelay) {
+			return nil
+		}
+	}
+}
+
+// round performs one connection attempt. Candidates are gathered up front and
+// carried inside the Hello frame so each round is a clean two-message
+// exchange: the joiner sends first, the host responds. Roles are fixed —
+// host is ICE-controlling and the QUIC client.
+func (rl *rendezvousLoop) round(ctx context.Context) (*peer.Session, *icewrap.Endpoint, error) {
+	cert, fp, err := xcrypto.GenerateCert()
+	if err != nil {
+		return nil, nil, err
+	}
 	ep, err := icewrap.New(icewrap.Config{
-		STUNServers:     rf.stunServers(),
-		TURNServers:     turns,
-		IncludeLoopback: rf.includeLoopback,
-		RelayOnly:       rf.forceRelay,
+		STUNServers:     rl.rf.stunServers(),
+		TURNServers:     rl.turns,
+		IncludeLoopback: rl.rf.includeLoopback,
+		RelayOnly:       rl.rf.forceRelay,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -203,26 +266,43 @@ func rendezvousConnect(
 		return nil, nil, err
 	}
 
-	// Hello exchange doubles as PAKE key confirmation: if the codes differed,
-	// the first Recv fails to decrypt.
-	if err := sc.Send(ctx, sig.MsgHello, &sig.Hello{
-		FP:    hex.EncodeToString(fp[:]),
-		Ufrag: ufrag,
-		Pwd:   pwd,
-	}); err != nil {
-		return nil, nil, err
-	}
-	t, raw, err := sc.Recv(ctx)
+	// Gather all candidates before exchanging (non-trickle keeps each round
+	// atomic over the mailbox).
+	gctx, gcancel := context.WithTimeout(ctx, rl.rf.gatherTimeout())
+	cands, err := ep.GatherAll(gctx)
+	gcancel()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("gather candidates: %w", err)
 	}
-	if t != sig.MsgHello {
-		return nil, nil, fmt.Errorf("expected hello frame, got %q", t)
+	marshaled := make([]string, 0, len(cands))
+	for _, c := range cands {
+		marshaled = append(marshaled, c.Marshal())
 	}
-	var remote sig.Hello
-	if err := json.Unmarshal(raw, &remote); err != nil {
-		return nil, nil, fmt.Errorf("malformed hello: %w", err)
+	if len(marshaled) == 0 {
+		return nil, nil, errors.New("no ICE candidates gathered (network down?)")
 	}
+
+	local := &sig.Hello{FP: hex.EncodeToString(fp[:]), Ufrag: ufrag, Pwd: pwd, Cands: marshaled}
+
+	// Message ordering: joiner sends its Hello first, host replies. The first
+	// Recv also confirms the PAKE key — a wrong room code fails to decrypt.
+	var remote *sig.Hello
+	if rl.isHost {
+		if remote, err = rl.recvHello(ctx); err != nil {
+			return nil, nil, err
+		}
+		if err = rl.sc.Send(ctx, sig.MsgHello, local); err != nil {
+			return nil, nil, err
+		}
+	} else {
+		if err = rl.sc.Send(ctx, sig.MsgHello, local); err != nil {
+			return nil, nil, err
+		}
+		if remote, err = rl.recvHello(ctx); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	fpBytes, err := hex.DecodeString(remote.FP)
 	if err != nil || len(fpBytes) != 32 {
 		return nil, nil, errors.New("malformed peer fingerprint")
@@ -230,43 +310,14 @@ func rendezvousConnect(
 	var expectedFP xcrypto.Fingerprint
 	copy(expectedFP[:], fpBytes)
 
-	// Trickle local candidates to the peer as they are discovered.
-	if err := ep.StartGather(); err != nil {
-		return nil, nil, err
+	for _, raw := range remote.Cands {
+		if err := ep.AddRemoteCandidate(raw); err != nil {
+			log.Printf("skipping bad remote candidate: %v", err)
+		}
 	}
-	go func() {
-		for c := range ep.Candidates() {
-			if err := sc.Send(ctx, sig.MsgCand, &sig.Cand{C: c.Marshal()}); err != nil {
-				return
-			}
-		}
-		_ = sc.Send(ctx, sig.MsgCand, &sig.Cand{End: true})
-	}()
-
-	// Consume the peer's trickled candidates until the connection succeeds.
-	recvCtx, stopRecv := context.WithCancel(ctx)
-	defer stopRecv()
-	go func() {
-		for {
-			t, raw, err := sc.Recv(recvCtx)
-			if err != nil {
-				return
-			}
-			if t != sig.MsgCand {
-				continue
-			}
-			var c sig.Cand
-			if err := json.Unmarshal(raw, &c); err != nil || c.End {
-				continue
-			}
-			if err := ep.AddRemoteCandidate(c.C); err != nil {
-				log.Printf("bad remote candidate: %v", err)
-			}
-		}
-	}()
 
 	log.Printf("connecting...")
-	if isHost {
+	if rl.isHost {
 		ic, err := ep.Dial(ctx, remote.Ufrag, remote.Pwd)
 		if err != nil {
 			return nil, nil, fmt.Errorf("ICE failed: %w", err)
@@ -288,4 +339,35 @@ func rendezvousConnect(
 	}
 	ok = true
 	return sess, ep, nil
+}
+
+func (rl *rendezvousLoop) recvHello(ctx context.Context) (*sig.Hello, error) {
+	t, raw, err := rl.sc.Recv(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if t != sig.MsgHello {
+		return nil, fmt.Errorf("expected hello frame, got %q", t)
+	}
+	var h sig.Hello
+	if err := json.Unmarshal(raw, &h); err != nil {
+		return nil, fmt.Errorf("malformed hello: %w", err)
+	}
+	return &h, nil
+}
+
+// gatherTimeout is the per-round candidate gathering deadline.
+func (r *rendezvousFlags) gatherTimeout() time.Duration { return 3 * time.Second }
+
+// sleepCtx sleeps for d unless ctx is cancelled first; returns false if
+// cancelled.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }

@@ -153,6 +153,27 @@ func (m *Mailbox) Recv(ctx context.Context) ([]byte, error) {
 	}
 }
 
+// Keepalive pings the server every interval until ctx is cancelled, so the
+// mailbox WebSocket survives long idle periods while a tunnel is live and can
+// still carry reconnect signaling. Run it in a goroutine.
+func (m *Mailbox) Keepalive(ctx context.Context, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			pctx, cancel := context.WithTimeout(ctx, writeTimeout)
+			err := m.ws.Ping(pctx)
+			cancel()
+			if err != nil {
+				return
+			}
+		}
+	}
+}
+
 // Close tears down the WebSocket.
 func (m *Mailbox) Close() error {
 	return m.ws.Close(websocket.StatusNormalClosure, "bye")

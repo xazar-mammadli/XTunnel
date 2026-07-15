@@ -27,13 +27,18 @@ const (
 	MsgTURN  = "turn"  // ephemeral TURN credentials issued by the host side
 )
 
-// Hello is each side's opening signaling frame.
+// Hello is each side's per-round signaling frame. It carries everything the
+// peer needs to attempt one connection: the session cert fingerprint, the ICE
+// credentials, and the full (non-trickled) candidate set. Bundling candidates
+// makes each connect/reconnect round atomic over the mailbox.
 type Hello struct {
 	// FP is the hex SHA-256 fingerprint of this peer's session TLS cert.
 	FP string `json:"fp"`
 	// Ufrag/Pwd are this peer's local ICE credentials.
 	Ufrag string `json:"ufrag"`
 	Pwd   string `json:"pwd"`
+	// Cands are this peer's ICE candidates in SDP attribute form.
+	Cands []string `json:"cands,omitempty"`
 }
 
 // Cand carries one ICE candidate in SDP attribute form.

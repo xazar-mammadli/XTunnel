@@ -97,7 +97,7 @@ func TestSecureChannelExchange(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got != *want {
+	if got.FP != want.FP || got.Ufrag != want.Ufrag || got.Pwd != want.Pwd {
 		t.Fatalf("hello mismatch: %+v != %+v", got, *want)
 	}
 
