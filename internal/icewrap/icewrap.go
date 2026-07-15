@@ -192,6 +192,12 @@ func (e *Endpoint) AddRemoteCandidate(raw string) error {
 	return e.agent.AddRemoteCandidate(c)
 }
 
+// AddRemoteCandidateObj registers an already-constructed remote candidate
+// (used by manual mode, which rebuilds candidates from blob form).
+func (e *Endpoint) AddRemoteCandidateObj(c ice.Candidate) error {
+	return e.agent.AddRemoteCandidate(c)
+}
+
 // Dial runs connectivity checks as the controlling agent.
 func (e *Endpoint) Dial(ctx context.Context, remoteUfrag, remotePwd string) (*ice.Conn, error) {
 	return e.agent.Dial(ctx, remoteUfrag, remotePwd)
