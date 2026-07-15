@@ -10,6 +10,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	"github.com/xazar/xtunnel/internal/mailbox"
+	"github.com/xazar/xtunnel/internal/relay"
 )
 
 var appVersion = "dev"
@@ -25,10 +28,14 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.LUTC)
 
 	var (
-		listen  = flag.String("listen", ":8080", "HTTP/WebSocket listen address")
-		tlsCert = flag.String("tls-cert", "", "TLS certificate file (serve wss:// directly)")
-		tlsKey  = flag.String("tls-key", "", "TLS key file")
-		version = flag.Bool("version", false, "print version and exit")
+		listen     = flag.String("listen", ":8080", "HTTP/WebSocket listen address")
+		tlsCert    = flag.String("tls-cert", "", "TLS certificate file (serve wss:// directly)")
+		tlsKey     = flag.String("tls-key", "", "TLS key file")
+		turnIP     = flag.String("turn-public-ip", "", "public IPv4 of this server; enables the embedded TURN relay fallback")
+		turnListen = flag.String("turn-listen", ":3478", "UDP listen address for the TURN relay")
+		turnSecret = flag.String("turn-secret", "", "shared HMAC secret for TURN credentials (random if empty)")
+		turnTTL    = flag.Duration("turn-ttl", time.Hour, "lifetime of issued TURN credentials")
+		version    = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
 
@@ -37,7 +44,33 @@ func main() {
 		return
 	}
 
-	mb := mailbox.New()
+	var issuer mailbox.TURNIssuer
+	if *turnIP != "" {
+		secret := *turnSecret
+		if secret == "" {
+			var b [32]byte
+			if _, err := rand.Read(b[:]); err != nil {
+				log.Fatalf("generate TURN secret: %v", err)
+			}
+			secret = hex.EncodeToString(b[:])
+		}
+		rs, err := relay.Start(relay.Config{
+			PublicIP:      *turnIP,
+			ListenAddr:    *turnListen,
+			Secret:        secret,
+			CredentialTTL: *turnTTL,
+		})
+		if err != nil {
+			log.Fatalf("start relay: %v", err)
+		}
+		defer rs.Close()
+		issuer = rs
+		log.Printf("TURN relay enabled: turn:%s:%d (creds valid %s)", *turnIP, rs.Port(), *turnTTL)
+	} else {
+		log.Printf("TURN relay disabled (no --turn-public-ip); peers behind symmetric NAT may fail to connect")
+	}
+
+	mb := mailbox.New(issuer)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", mb.HandleWS)

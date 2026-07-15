@@ -55,6 +55,12 @@ type room struct {
 	burned bool
 }
 
+// TURNIssuer mints ephemeral relay credentials for peers. Implemented by
+// internal/relay; nil when the server runs without an embedded relay.
+type TURNIssuer interface {
+	Issue(ttl time.Duration) (signal.TURNCred, bool)
+}
+
 // mailbox is the in-memory room registry. Nothing is ever persisted.
 type Server struct {
 	mu    sync.Mutex
@@ -62,15 +68,31 @@ type Server struct {
 
 	limMu    sync.Mutex
 	limiters map[string]*rate.Limiter
+
+	turn TURNIssuer
 }
 
-func New() *Server {
+// New builds a mailbox. issuer may be nil (no relay fallback offered).
+func New(issuer TURNIssuer) *Server {
 	m := &Server{
 		rooms:    make(map[string]*room),
 		limiters: make(map[string]*rate.Limiter),
+		turn:     issuer,
 	}
 	go m.janitor()
 	return m
+}
+
+// turnCreds returns freshly issued relay credentials, or nil if no relay.
+func (m *Server) turnCreds() []signal.TURNCred {
+	if m.turn == nil {
+		return nil
+	}
+	cred, ok := m.turn.Issue(0)
+	if !ok {
+		return nil
+	}
+	return []signal.TURNCred{cred}
 }
 
 // limiter returns the per-IP rate limiter for room create/join operations.
@@ -196,7 +218,7 @@ func (m *Server) serveCreator(ctx context.Context, slot *peerSlot) {
 	m.mu.Unlock()
 	log.Printf("room %s created", code)
 
-	if err := slot.send(ctx, &signal.Envelope{Type: "created", Room: code}); err != nil {
+	if err := slot.send(ctx, &signal.Envelope{Type: "created", Room: code, TURN: m.turnCreds()}); err != nil {
 		m.dropPeer(code, r, 0)
 		return
 	}
@@ -238,7 +260,7 @@ func (m *Server) serveJoiner(ctx context.Context, slot *peerSlot, code string) {
 	if host != nil {
 		_ = host.send(ctx, &signal.Envelope{Type: "peer"})
 	}
-	if err := slot.send(ctx, &signal.Envelope{Type: "joined"}); err != nil {
+	if err := slot.send(ctx, &signal.Envelope{Type: "joined", TURN: m.turnCreds()}); err != nil {
 		m.dropPeer(code, r, 1)
 		return
 	}

@@ -27,6 +27,7 @@ type rendezvousFlags struct {
 	turn            turnList
 	pairTimeout     time.Duration
 	includeLoopback bool
+	forceRelay      bool
 }
 
 func (r *rendezvousFlags) register(fs *flag.FlagSet) {
@@ -35,6 +36,7 @@ func (r *rendezvousFlags) register(fs *flag.FlagSet) {
 	fs.Var(&r.turn, "turn", "extra TURN relay as url,username,password (repeatable)")
 	fs.DurationVar(&r.pairTimeout, "pair-timeout", 10*time.Minute, "how long to wait for the peer")
 	fs.BoolVar(&r.includeLoopback, "include-loopback", false, "gather loopback candidates (same-machine testing)")
+	fs.BoolVar(&r.forceRelay, "force-relay", false, "use only relay candidates (testing the TURN fallback path)")
 }
 
 func (r *rendezvousFlags) stunServers() []string {
@@ -167,10 +169,22 @@ func rendezvousConnect(
 	if err != nil {
 		return nil, nil, err
 	}
+
+	// Combine user-supplied TURN relays with any the server issued during
+	// CreateRoom/JoinRoom (the relay fallback path).
+	turns := append([]icewrap.TURNServer(nil), rf.turn...)
+	for _, t := range mb.TURNServers() {
+		turns = append(turns, icewrap.TURNServer{URL: t.URL, Username: t.Username, Password: t.Password})
+	}
+	if len(turns) > len(rf.turn) {
+		log.Printf("relay fallback available via server-issued TURN credentials")
+	}
+
 	ep, err := icewrap.New(icewrap.Config{
 		STUNServers:     rf.stunServers(),
-		TURNServers:     rf.turn,
+		TURNServers:     turns,
 		IncludeLoopback: rf.includeLoopback,
+		RelayOnly:       rf.forceRelay,
 	})
 	if err != nil {
 		return nil, nil, err

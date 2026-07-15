@@ -16,7 +16,7 @@ import (
 // startServer runs the real xtunneld mailbox on an httptest listener.
 func startServer(t *testing.T) string {
 	t.Helper()
-	mb := mailbox.New()
+	mb := mailbox.New(nil)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", mb.HandleWS)
 	srv := httptest.NewServer(mux)

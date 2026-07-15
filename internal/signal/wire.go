@@ -14,6 +14,10 @@ type Envelope struct {
 	Room string `json:"room,omitempty"`
 	Body []byte `json:"body,omitempty"`
 	Err  string `json:"error,omitempty"`
+	// TURN carries ephemeral relay credentials issued by the server on
+	// "created"/"joined". Not secret from the server (it runs the relay);
+	// the mailbox connection's TLS protects them on the wire.
+	TURN []TURNCred `json:"turn,omitempty"`
 }
 
 // Signaling message types carried inside encrypted frames.

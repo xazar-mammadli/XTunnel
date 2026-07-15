@@ -24,6 +24,8 @@ type Mailbox struct {
 	ws *websocket.Conn
 
 	sendMu sync.Mutex
+
+	turn []TURNCred // relay credentials issued by the server, if any
 }
 
 // DialMailbox connects to an xtunneld server. Accepts ws://, wss://, http://
@@ -92,8 +94,13 @@ func (m *Mailbox) CreateRoom(ctx context.Context) (string, error) {
 	if env.Type != "created" || env.Room == "" {
 		return "", fmt.Errorf("unexpected server reply %q", env.Type)
 	}
+	m.turn = env.TURN
 	return env.Room, nil
 }
+
+// TURNServers returns the ephemeral relay credentials the server issued during
+// CreateRoom/JoinRoom, or nil if the server has no relay configured.
+func (m *Mailbox) TURNServers() []TURNCred { return m.turn }
 
 // JoinRoom claims the second slot of an existing room.
 func (m *Mailbox) JoinRoom(ctx context.Context, code string) error {
@@ -107,6 +114,7 @@ func (m *Mailbox) JoinRoom(ctx context.Context, code string) error {
 	if env.Type != "joined" {
 		return fmt.Errorf("unexpected server reply %q", env.Type)
 	}
+	m.turn = env.TURN
 	return nil
 }
 
