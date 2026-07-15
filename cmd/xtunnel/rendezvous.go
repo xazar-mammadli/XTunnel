@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -49,8 +50,12 @@ func (r *rendezvousFlags) stunServers() []string {
 }
 
 // reconnect pacing for non-interactive rounds after the initial pairing.
+// reconnectTimeout is deliberately above the QUIC idle timeout (60s, see
+// peer.quicConfig): a peer may take that long to notice the drop, and a round
+// must stay open long enough for it to respond, so neither side re-sends an
+// opener and buffers a stale frame while the other is still catching up.
 const (
-	reconnectTimeout = 45 * time.Second
+	reconnectTimeout = 90 * time.Second
 	reconnectDelay   = 2 * time.Second
 	keepaliveEvery   = 25 * time.Second
 )
@@ -80,10 +85,17 @@ func runHost(args []string) error {
 	}
 	defer mb.Close()
 
-	code, err := mb.CreateRoom(ctx)
+	nameplate, err := mb.CreateRoom(ctx)
 	if err != nil {
 		return err
 	}
+	// The server assigns the nameplate; we add the secret words locally so the
+	// server never learns the full code (the PAKE password).
+	secret, err := sig.NewSecretWords()
+	if err != nil {
+		return err
+	}
+	code := nameplate + "-" + secret
 	log.Printf("room code — give it to the joining side:")
 	fmt.Println(code)
 	log.Printf("waiting for peer (up to %s)...", rf.pairTimeout)
@@ -120,8 +132,12 @@ func runJoin(args []string) error {
 	if code == "" && fs.NArg() > 0 {
 		code = fs.Arg(0)
 	}
+	code = strings.TrimSpace(code)
 	if code == "" {
 		return errors.New("usage: xtunnel join <room-code> --server <url> -L <local:remote>")
+	}
+	if !sig.ValidCode(code) {
+		return fmt.Errorf("invalid pairing code %q (expected e.g. 42-apple-river-cedar)", code)
 	}
 	if rf.server == "" {
 		return errors.New("--server (or $XTUNNEL_SERVER) is required")
@@ -139,7 +155,9 @@ func runJoin(args []string) error {
 	}
 	defer mb.Close()
 
-	if err := mb.JoinRoom(ctx, strings.TrimSpace(code)); err != nil {
+	// Only the nameplate goes to the server for routing; the full code
+	// (including the secret words) stays local and keys the PAKE.
+	if err := mb.JoinRoom(ctx, sig.Nameplate(code)); err != nil {
 		return err
 	}
 	log.Printf("joined room, authenticating...")
@@ -284,21 +302,35 @@ func (rl *rendezvousLoop) round(ctx context.Context) (*peer.Session, *icewrap.En
 
 	local := &sig.Hello{FP: hex.EncodeToString(fp[:]), Ufrag: ufrag, Pwd: pwd, Cands: marshaled}
 
-	// Message ordering: joiner sends its Hello first, host replies. The first
-	// Recv also confirms the PAKE key — a wrong room code fails to decrypt.
+	// Clear any frames left buffered by an aborted round before starting.
+	rl.sc.Drain()
+
+	// Message ordering: the joiner opens each round with a fresh round id; the
+	// host adopts and echoes it. Either side rejects a Hello that does not
+	// belong to this round, so a stale frame from an aborted round can never
+	// desync the reconnect loop. The first decrypt also confirms the PAKE key —
+	// a wrong code fails to decrypt.
 	var remote *sig.Hello
 	if rl.isHost {
-		if remote, err = rl.recvHello(ctx); err != nil {
+		if remote, err = rl.recvOpener(ctx); err != nil {
 			return nil, nil, err
 		}
+		local.Rid = remote.Rid
+		local.Reply = true
 		if err = rl.sc.Send(ctx, sig.MsgHello, local); err != nil {
 			return nil, nil, err
 		}
 	} else {
+		rid, rerr := randRid()
+		if rerr != nil {
+			return nil, nil, rerr
+		}
+		local.Rid = rid
+		local.Reply = false
 		if err = rl.sc.Send(ctx, sig.MsgHello, local); err != nil {
 			return nil, nil, err
 		}
-		if remote, err = rl.recvHello(ctx); err != nil {
+		if remote, err = rl.recvReply(ctx, rid); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -341,19 +373,81 @@ func (rl *rendezvousLoop) round(ctx context.Context) (*peer.Session, *icewrap.En
 	return sess, ep, nil
 }
 
-func (rl *rendezvousLoop) recvHello(ctx context.Context) (*sig.Hello, error) {
-	t, raw, err := rl.sc.Recv(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if t != sig.MsgHello {
-		return nil, fmt.Errorf("expected hello frame, got %q", t)
-	}
+func decodeHello(raw json.RawMessage) (*sig.Hello, error) {
 	var h sig.Hello
 	if err := json.Unmarshal(raw, &h); err != nil {
 		return nil, fmt.Errorf("malformed hello: %w", err)
 	}
 	return &h, nil
+}
+
+// recvOpener (host side) blocks for the joiner's round-opening Hello, then
+// drains any additional buffered openers and keeps the newest — so if the
+// joiner retried and buffered several openers, the host answers the current
+// one rather than a stale one.
+func (rl *rendezvousLoop) recvOpener(ctx context.Context) (*sig.Hello, error) {
+	var latest *sig.Hello
+	for latest == nil {
+		t, raw, err := rl.sc.Recv(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if t != sig.MsgHello {
+			continue
+		}
+		h, err := decodeHello(raw)
+		if err != nil {
+			return nil, err
+		}
+		if h.Reply {
+			continue // stale echo from an aborted round
+		}
+		latest = h
+	}
+	// Drain newer openers that are already buffered.
+	for {
+		t, raw, ok := rl.sc.TryRecv()
+		if !ok {
+			break
+		}
+		if t != sig.MsgHello {
+			continue
+		}
+		if h, err := decodeHello(raw); err == nil && !h.Reply {
+			latest = h
+		}
+	}
+	return latest, nil
+}
+
+// recvReply (joiner side) waits for the host's reply matching this round's id,
+// skipping any stale frame from an aborted round.
+func (rl *rendezvousLoop) recvReply(ctx context.Context, rid string) (*sig.Hello, error) {
+	for {
+		t, raw, err := rl.sc.Recv(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if t != sig.MsgHello {
+			continue
+		}
+		h, err := decodeHello(raw)
+		if err != nil {
+			return nil, err
+		}
+		if h.Reply && h.Rid == rid {
+			return h, nil
+		}
+	}
+}
+
+// randRid returns a fresh 8-byte round identifier as hex.
+func randRid() (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
 }
 
 // gatherTimeout is the per-round candidate gathering deadline.

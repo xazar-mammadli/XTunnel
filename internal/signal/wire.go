@@ -39,6 +39,13 @@ type Hello struct {
 	Pwd   string `json:"pwd"`
 	// Cands are this peer's ICE candidates in SDP attribute form.
 	Cands []string `json:"cands,omitempty"`
+	// Rid identifies the connection round. The joiner picks a fresh Rid per
+	// round; the host echoes it in its reply. This lets each side reject a
+	// stale Hello left buffered by an aborted round, so the reconnect loop
+	// never desyncs. Reply distinguishes the host's response from the joiner's
+	// opener.
+	Rid   string `json:"rid,omitempty"`
+	Reply bool   `json:"reply,omitempty"`
 }
 
 // Cand carries one ICE candidate in SDP attribute form.

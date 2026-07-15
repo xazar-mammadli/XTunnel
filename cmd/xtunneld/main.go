@@ -34,7 +34,7 @@ func main() {
 		turnIP     = flag.String("turn-public-ip", "", "public IPv4 of this server; enables the embedded TURN relay fallback")
 		turnListen = flag.String("turn-listen", ":3478", "UDP listen address for the TURN relay")
 		turnSecret = flag.String("turn-secret", "", "shared HMAC secret for TURN credentials (random if empty)")
-		turnTTL    = flag.Duration("turn-ttl", time.Hour, "lifetime of issued TURN credentials")
+		turnTTL    = flag.Duration("turn-ttl", 24*time.Hour, "lifetime of issued TURN credentials; must exceed the tunnel's expected lifetime so relayed reconnects keep working (creds are issued once at pairing)")
 		version    = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()

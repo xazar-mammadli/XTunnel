@@ -57,9 +57,9 @@ Typical blobs are 90–140 characters.
 
 ```
 client → server:  {type: "create"}
-                  {type: "join", room}
+                  {type: "join", room}      // room = nameplate only
                   {type: "msg",  body}
-server → client:  {type: "created", room, turn?}
+server → client:  {type: "created", room, turn?}   // room = nameplate
                   {type: "joined", turn?}
                   {type: "peer"}            // host: a joiner arrived
                   {type: "msg", body}       // relayed opaque payload
@@ -68,16 +68,27 @@ server → client:  {type: "created", room, turn?}
 ```
 
 The server relays `body` blindly between the two peers in a room. It never sees
-inside `body`. Room codes are `N-word-word` (~20 bits), one-time, ~10 minute
-TTL, burned on a failed PAKE. `turn` carries ephemeral relay credentials when
-the server runs an embedded TURN relay.
+inside `body`. `turn` carries ephemeral relay credentials when the server runs
+an embedded TURN relay.
+
+**Code split (server cannot MITM).** The full pairing code is
+`nameplate-word-word-word`, e.g. `42731-apple-river-cedar`. The **nameplate**
+(`42731`) is assigned by the server and used only for routing — it is the
+`room` in join/create envelopes. The **secret words** are generated
+client-side with local entropy (~21 bits) and are the PAKE password material;
+they never reach the server. Because the server never learns the full code, it
+cannot derive the SPAKE2 session key, so it cannot decrypt signaling or splice
+a man-in-the-middle session — even though it relays the ciphertext. Nameplates
+are one-time, ~10 minute unpaired TTL, and the room is burned on a failed PAKE.
 
 ### PAKE and encrypted frames
 
 Both peers run SPAKE2 over P-256 (`schollz/pake` v3, explicitly the P-256
-curve) keyed by the transcript `xtunnel/1|rendezvous|<code>`, exchanging the two
-PAKE messages through the mailbox. The resulting shared secret is expanded with
-HKDF into two ChaCha20-Poly1305 keys (one per direction):
+curve) keyed by the transcript `xtunnel/1|rendezvous|<full-code>` — the full
+code including the client-generated secret words, which the server never sees.
+The two PAKE messages are exchanged through the mailbox. The resulting shared
+secret is expanded with HKDF into two ChaCha20-Poly1305 keys (one per
+direction):
 
 ```
 hostKey = HKDF-SHA256(K, info="xtunnel/sig/host->join")
@@ -91,10 +102,13 @@ Every subsequent `msg` body is an AEAD frame:
 ```
 
 The counter is the nonce and is checked for strict monotonicity (replay
-protection). The plaintext is `{"t": type, "d": payload}`. A decryption failure
-on the first frame means the two sides derived different keys — i.e. a wrong or
-guessed room code — and pairing aborts. This bounds a malicious server to one
-online guess per code.
+protection). A background read pump owns all mailbox reads for the channel's
+lifetime, decrypting frames onto a buffered queue — this lets keepalive pings
+have their pongs processed while no round is receiving, and lets a reconnect
+round drain stale frames. The plaintext is `{"t": type, "d": payload}`. A
+decryption failure means the two sides derived different keys — i.e. a wrong or
+guessed code — and pairing aborts. This bounds a malicious server to one online
+guess per code.
 
 ### Connection rounds
 
@@ -102,13 +116,19 @@ Signaling frame types: `hello` (per round). Candidates are bundled inside the
 `hello` frame (non-trickle), so each round is a clean two-message exchange:
 
 ```
-hello = {fp, ufrag, pwd, cands: [ICE candidate strings]}
+hello = {fp, ufrag, pwd, cands: [ICE candidate strings], rid, reply}
 ```
 
-Ordering per round: the **joiner sends its `hello` first**, the host responds.
-Both then add the peer's candidates, run ICE (host dials, joiner accepts), and
-perform the QUIC handshake. On reconnect the same secure channel is reused for a
-new round — no new PAKE, no new room code.
+Ordering per round: the **joiner opens** with a fresh random round id `rid`
+(`reply=false`); the **host echoes** that `rid` (`reply=true`) in its response.
+Each side rejects a `hello` that does not belong to the current round (wrong
+`rid`, or a stale opener), and both drain buffered frames at round start, so a
+frame left over from an aborted round can never desync the loop. Both then add
+the peer's candidates, run ICE (host dials, joiner accepts), and perform the
+QUIC handshake. On reconnect the same secure channel is reused for a new round —
+no new PAKE, no new code. The reconnect round timeout (90s) exceeds the QUIC
+idle timeout (60s) so a peer always has time to notice a drop and answer before
+the other re-sends.
 
 ## Data plane (over QUIC)
 

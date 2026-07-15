@@ -111,18 +111,36 @@ func (m *Server) limiter(ip string) *rate.Limiter {
 func (m *Server) janitor() {
 	for range time.Tick(time.Minute) {
 		now := time.Now()
+
+		// Collect expired rooms' sockets under the lock, but never perform the
+		// (potentially blocking) WebSocket close while holding m.mu — an
+		// unresponsive client would otherwise freeze all signaling.
+		var toClose []*peerSlot
 		m.mu.Lock()
 		for code, r := range m.rooms {
 			r.mu.Lock()
 			paired := r.slots[0] != nil && r.slots[1] != nil
 			expired := (!paired && now.Sub(r.created) > unpairedTTL) ||
 				now.Sub(r.created) > pairedTTL
+			if expired {
+				r.burned = true
+				for _, s := range r.slots {
+					if s != nil {
+						toClose = append(toClose, s)
+					}
+				}
+				r.slots = [2]*peerSlot{}
+			}
 			r.mu.Unlock()
 			if expired {
-				m.closeRoom(code, r, "room expired")
+				delete(m.rooms, code)
 			}
 		}
 		m.mu.Unlock()
+
+		for _, s := range toClose {
+			_ = s.ws.CloseNow() // no close handshake — janitor must not block
+		}
 
 		// Trim the limiter map so idle IPs do not accumulate forever.
 		m.limMu.Lock()
@@ -133,21 +151,6 @@ func (m *Server) janitor() {
 		}
 		m.limMu.Unlock()
 	}
-}
-
-// closeRoom must be called with m.mu held.
-func (m *Server) closeRoom(code string, r *room, reason string) {
-	r.mu.Lock()
-	r.burned = true
-	slots := r.slots
-	r.slots = [2]*peerSlot{}
-	r.mu.Unlock()
-	for _, s := range slots {
-		if s != nil {
-			_ = s.ws.Close(websocket.StatusGoingAway, reason)
-		}
-	}
-	delete(m.rooms, code)
 }
 
 func clientIP(r *http.Request) string {
@@ -197,11 +200,14 @@ func (m *Server) HandleWS(w http.ResponseWriter, req *http.Request) {
 }
 
 func (m *Server) serveCreator(ctx context.Context, slot *peerSlot) {
+	// The server assigns only a routing nameplate. The secret words that make
+	// up the PAKE password are generated client-side and never reach here, so
+	// the server cannot derive the session key or MITM the tunnel.
 	var code string
 	var r *room
 	m.mu.Lock()
 	for {
-		c, err := signal.NewRoomCode()
+		c, err := signal.NewNameplate()
 		if err != nil {
 			m.mu.Unlock()
 			_ = slot.send(ctx, &signal.Envelope{Type: "error", Err: "internal error"})
@@ -226,7 +232,7 @@ func (m *Server) serveCreator(ctx context.Context, slot *peerSlot) {
 }
 
 func (m *Server) serveJoiner(ctx context.Context, slot *peerSlot, code string) {
-	if !signal.ValidRoomCode(code) {
+	if !signal.ValidNameplate(code) {
 		_ = slot.send(ctx, &signal.Envelope{Type: "error", Err: "invalid room code"})
 		return
 	}

@@ -293,15 +293,24 @@ func (j *Join) forwardConn(ctx context.Context, tcp *net.TCPConn, port uint16, l
 	case StatusOK:
 	case StatusPortRefused:
 		logf("port %d: refused by host (not exposed)", port)
+		closeStream(st, errCodeRefused)
 		_ = tcp.Close()
 		return
 	default:
 		logf("port %d: host could not reach local service (status %d)", port, status[0])
+		closeStream(st, errCodeRefused)
 		_ = tcp.Close()
 		return
 	}
 
 	proxy(st, tcp)
+}
+
+// closeStream drives both halves of a QUIC stream to a terminal state so
+// neither the send nor the receive side lingers after an early return.
+func closeStream(st *quic.Stream, code quic.StreamErrorCode) {
+	st.CancelRead(code)
+	st.CancelWrite(code)
 }
 
 // ---------------------------------------------------------------------------

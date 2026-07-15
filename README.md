@@ -72,10 +72,10 @@ $ xtunneld --listen :443 --tls-cert cert.pem --tls-key key.pem \
 # Machine A:
 $ xtunnel host --server wss://tunnel.example.com --expose 5432
 room code — give it to the joining side:
-7-zebra-canyon
+42731-apple-river-cedar
 
 # Machine B:
-$ xtunnel join 7-zebra-canyon --server wss://tunnel.example.com -L 15432:5432
+$ xtunnel join 42731-apple-river-cedar --server wss://tunnel.example.com -L 15432:5432
 ```
 
 In rendezvous mode the tunnel **auto-reconnects**: if the connection drops, the
@@ -108,8 +108,10 @@ Repeat `-L` (and `--expose`) to forward several ports over one tunnel.
 ```
 
 1. **Pairing.** In rendezvous mode both peers run a PAKE (SPAKE2 over P-256)
-   keyed by the room code, so a malicious or compromised server gets only one
-   online guess. In manual mode the copy-paste channel is the trust anchor.
+   keyed by the FULL code, whose secret words are generated client-side and
+   never reach the server — so a malicious or compromised server cannot derive
+   the session key or MITM the tunnel, and online guessing is bounded to one
+   attempt per code. In manual mode the copy-paste channel is the trust anchor.
 2. **NAT traversal.** Each peer gathers ICE candidates (host, STUN-reflexive,
    TURN-relay) and they run connectivity checks to find a working path.
 3. **Encryption.** QUIC/TLS 1.3 runs over the chosen path. Each side pins the

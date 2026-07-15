@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"regexp"
+	"strings"
 )
 
 // codeWords is a 128-entry list of short, phonetically distinct English
@@ -31,26 +32,63 @@ var codeWords = []string{
 	"plum", "prism", "quartz", "raven", "reef", "river", "salmon", "zebra",
 }
 
-var codeRe = regexp.MustCompile(`^[0-9]{1,2}-[a-z]+-[a-z]+$`)
+var (
+	// nameplateRe matches the server-assigned routing id (not secret).
+	nameplateRe = regexp.MustCompile(`^[0-9]{1,5}$`)
+	// codeRe matches a full pairing code: nameplate + secret words.
+	codeRe = regexp.MustCompile(`^[0-9]{1,5}(-[a-z]+){2,}$`)
+)
 
-// NewRoomCode generates a fresh "N-word-word" room code.
-func NewRoomCode() (string, error) {
-	n, err := rand.Int(rand.Reader, big.NewInt(98))
+// secretWordCount is how many secret words the client mixes into the code.
+// Three words over a 128-word list is ~21 bits — comparable to magic-wormhole
+// and, combined with a one-time code + PAKE (one online guess) + rate limiting,
+// impractical to guess online.
+const secretWordCount = 3
+
+// NewNameplate generates a short server-side routing id. It is NOT secret: the
+// server assigns it and uses it only to pair the two peers. The PAKE password
+// is the full code, whose secret words are generated client-side and never
+// reach the server.
+func NewNameplate() (string, error) {
+	n, err := rand.Int(rand.Reader, big.NewInt(90000))
 	if err != nil {
 		return "", err
 	}
-	w1, err := rand.Int(rand.Reader, big.NewInt(int64(len(codeWords))))
-	if err != nil {
-		return "", err
-	}
-	w2, err := rand.Int(rand.Reader, big.NewInt(int64(len(codeWords))))
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%d-%s-%s", n.Int64()+2, codeWords[w1.Int64()], codeWords[w2.Int64()]), nil
+	return fmt.Sprintf("%d", n.Int64()+10000), nil
 }
 
-// ValidRoomCode is a cheap syntactic check used before registry lookups.
-func ValidRoomCode(code string) bool {
-	return len(code) <= 32 && codeRe.MatchString(code)
+// NewSecretWords generates the client-side secret portion of a pairing code.
+// This is the entropy the server must not know: it is the PAKE password
+// material, so a malicious server cannot derive the session key and MITM.
+func NewSecretWords() (string, error) {
+	words := make([]string, secretWordCount)
+	for i := range words {
+		w, err := rand.Int(rand.Reader, big.NewInt(int64(len(codeWords))))
+		if err != nil {
+			return "", err
+		}
+		words[i] = codeWords[w.Int64()]
+	}
+	return strings.Join(words, "-"), nil
+}
+
+// Nameplate extracts the routing id (the part before the first "-") from a
+// full pairing code. The remaining secret words never leave the client.
+func Nameplate(code string) string {
+	code = strings.TrimSpace(code)
+	if i := strings.IndexByte(code, '-'); i >= 0 {
+		return code[:i]
+	}
+	return code
+}
+
+// ValidNameplate checks the server-side routing id.
+func ValidNameplate(s string) bool {
+	return len(s) <= 8 && nameplateRe.MatchString(s)
+}
+
+// ValidCode checks the full client-facing pairing code (nameplate + words).
+func ValidCode(code string) bool {
+	code = strings.TrimSpace(code)
+	return len(code) <= 64 && codeRe.MatchString(code)
 }

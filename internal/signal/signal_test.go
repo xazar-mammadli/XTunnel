@@ -36,8 +36,8 @@ func pairedBoxes(t *testing.T, ctx context.Context, url string) (host, join *sig
 	if err != nil {
 		t.Fatalf("create room: %v", err)
 	}
-	if !signal.ValidRoomCode(code) {
-		t.Fatalf("generated code %q fails validation", code)
+	if !signal.ValidNameplate(code) {
+		t.Fatalf("generated nameplate %q fails validation", code)
 	}
 
 	j, err := signal.DialMailbox(ctx, url)
@@ -171,6 +171,72 @@ func TestSecureChannelWrongCode(t *testing.T) {
 	}
 }
 
+// TestSecureDrainDiscardsBufferedFrames locks in the reconnect-desync fix:
+// frames left buffered by an aborted round must be discardable so the next
+// round starts clean.
+func TestSecureDrainDiscardsBufferedFrames(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	url := startServer(t)
+	h, j, code := pairedBoxes(t, ctx, url)
+
+	type res struct {
+		sc  *signal.SecureChannel
+		err error
+	}
+	hCh := make(chan res, 1)
+	go func() { sc, err := signal.Secure(ctx, h, code, true); hCh <- res{sc, err} }()
+	scJ, err := signal.Secure(ctx, j, code, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hr := <-hCh
+	if hr.err != nil {
+		t.Fatal(hr.err)
+	}
+	scH := hr.sc
+
+	// Host sends three frames the joiner never consumes in-order.
+	for i := 0; i < 3; i++ {
+		if err := scH.Send(ctx, signal.MsgHello, &signal.Hello{Rid: "stale"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Give the pump time to buffer them, then drain.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, _, ok := scJ.TryRecv(); ok {
+			break // at least one frame arrived
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no frame ever buffered")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	scJ.Drain()
+
+	// After draining, a fresh frame must still come through cleanly.
+	if err := scH.Send(ctx, signal.MsgHello, &signal.Hello{Rid: "fresh", Reply: true}); err != nil {
+		t.Fatal(err)
+	}
+	// Drain may have raced ahead of the fresh frame; read until we see it.
+	got := ""
+	for got != "fresh" {
+		typ, raw, err := scJ.Recv(ctx)
+		if err != nil {
+			t.Fatalf("recv after drain: %v", err)
+		}
+		if typ != signal.MsgHello {
+			continue
+		}
+		var hh signal.Hello
+		if err := json.Unmarshal(raw, &hh); err != nil {
+			t.Fatal(err)
+		}
+		got = hh.Rid
+	}
+}
+
 // TestJoinNonexistentRoom rejects a well-formed but unknown code.
 func TestJoinNonexistentRoom(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -186,20 +252,36 @@ func TestJoinNonexistentRoom(t *testing.T) {
 	}
 }
 
-// TestRoomCodeRoundTrip sanity-checks the code generator against its validator.
-func TestRoomCodeRoundTrip(t *testing.T) {
+// TestCodeGeneration checks the nameplate/secret generators against validators
+// and confirms a full code carries the secret words the server never sees.
+func TestCodeGeneration(t *testing.T) {
 	for i := 0; i < 200; i++ {
-		c, err := signal.NewRoomCode()
+		np, err := signal.NewNameplate()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !signal.ValidRoomCode(c) {
-			t.Fatalf("generated code %q fails ValidRoomCode", c)
+		if !signal.ValidNameplate(np) {
+			t.Fatalf("generated nameplate %q fails ValidNameplate", np)
+		}
+		secret, err := signal.NewSecretWords()
+		if err != nil {
+			t.Fatal(err)
+		}
+		full := np + "-" + secret
+		if !signal.ValidCode(full) {
+			t.Fatalf("full code %q fails ValidCode", full)
+		}
+		if signal.Nameplate(full) != np {
+			t.Fatalf("Nameplate(%q) = %q, want %q", full, signal.Nameplate(full), np)
+		}
+		// The secret words must not be recoverable from the nameplate alone.
+		if signal.ValidNameplate(full) {
+			t.Fatalf("full code %q wrongly accepted as a bare nameplate", full)
 		}
 	}
-	for _, bad := range []string{"", "zebra-comet", "1-Zebra-comet", "999-a-b", "1-a-b-c", strings.Repeat("1", 40)} {
-		if signal.ValidRoomCode(bad) {
-			t.Errorf("ValidRoomCode(%q) should be false", bad)
+	for _, bad := range []string{"", "zebra-comet", "1-Zebra-comet", "abc-a-b", strings.Repeat("1", 70)} {
+		if signal.ValidCode(bad) {
+			t.Errorf("ValidCode(%q) should be false", bad)
 		}
 	}
 }
