@@ -18,7 +18,7 @@ import (
 // buildLoop pairs a mailbox client, runs PAKE, and returns a ready loop.
 func buildLoop(t *testing.T, ctx context.Context, mb *sig.Mailbox, code string, isHost bool) *rendezvousLoop {
 	t.Helper()
-	sc, err := sig.Secure(ctx, mb, code, isHost)
+	sc, err := sig.Secure(ctx, mb, code, isHost, sig.ModeRendezvous)
 	if err != nil {
 		t.Fatalf("secure (host=%v): %v", isHost, err)
 	}

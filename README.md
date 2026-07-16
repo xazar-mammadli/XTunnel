@@ -8,8 +8,8 @@ WebRTC, but for forwarding ports from a terminal.
   punching fails.
 - **End-to-end encrypted** with QUIC/TLS 1.3 and certificate-fingerprint
   pinning. The rendezvous server and relay only ever see ciphertext.
-- **Two pairing modes**: a self-hosted rendezvous server with short room codes,
-  or fully serverless copy-paste pairing codes.
+- **Pair with one short code** through a public signaling broker (no server to
+  run), a self-hosted rendezvous server, or fully offline copy-paste codes.
 - **Single static binary**, no CGo. Runs on Linux, macOS and Windows —
   x86-64 and arm64.
 
@@ -30,33 +30,43 @@ go install github.com/xazar/xtunnel/cmd/xtunneld@latest
 
 ## Usage
 
-There are two ways to pair the two sides. Both give the same encrypted tunnel;
+There are three ways to pair the two sides. All give the same encrypted tunnel;
 they differ only in how the two peers first find each other.
 
-### Manual mode (no server)
+### One-code pairing (no server to run)
 
-The side that shares a port runs `offer`; the other runs `answer`. You copy two
-short codes between them over any channel (chat, email, a phone call).
+The side that shares a port runs `offer` and gets one short code; the other
+runs `answer` with it. Signaling goes through a public pub/sub broker
+(ntfy.sh by default) — you run nothing, and the broker only ever sees
+ciphertext (PAKE keeps it from reading or MITM-ing the tunnel).
 
 ```sh
 # Machine A — share local port 5432 (e.g. Postgres):
 $ xtunnel offer --expose 5432
-your pairing code (108 chars) — send it to the other side:
-xt1_EQABAgMEBQ...          # <- send this to B
+pairing code — run this on the other machine:
+
+    xtunnel answer apple-river-cedar-otter-maple-delta -L <localport>:5432
 
 # Machine B — forward local port 15432 to A's port 5432:
-$ xtunnel answer xt1_EQABAgMEBQ... -L 15432:5432
-your reply code (108 chars) — send it back to the offerer:
-xt1_HZk3pR8s...            # <- send this back to A
-
-# Machine A — paste B's reply at the prompt, and the tunnel comes up.
+$ xtunnel answer apple-river-cedar-otter-maple-delta -L 15432:5432
 ```
 
 Now on machine B, `psql -h 127.0.0.1 -p 15432` reaches A's Postgres.
 
-The pairing codes are only valid for a short window (NAT bindings go stale), so
-exchange them promptly. Manual mode has no relay unless you pass
-`--turn url,user,pass`.
+The code is one-time and high-entropy; exchange it reasonably promptly (NAT
+bindings go stale). Point `--signal-url https://your-ntfy` at a different broker
+if you like. This mode has no relay fallback (STUN only); use rendezvous mode
+below if you need to traverse symmetric NATs.
+
+### Offline copy-paste (no network at all for signaling)
+
+Add `--offline` to both sides to exchange two base64 blobs by hand — no broker,
+useful when even a public broker is unreachable:
+
+```sh
+$ xtunnel offer --offline --expose 5432       # prints xt1_… ; paste B's reply back
+$ xtunnel answer --offline xt1_… -L 15432:5432 # prints xt1_… reply to send to A
+```
 
 ### Rendezvous mode (self-hosted server)
 
@@ -107,11 +117,12 @@ Repeat `-L` (and `--expose`) to forward several ports over one tunnel.
    └─────────┘                           └─────────┘
 ```
 
-1. **Pairing.** In rendezvous mode both peers run a PAKE (SPAKE2 over P-256)
-   keyed by the FULL code, whose secret words are generated client-side and
-   never reach the server — so a malicious or compromised server cannot derive
-   the session key or MITM the tunnel, and online guessing is bounded to one
-   attempt per code. In manual mode the copy-paste channel is the trust anchor.
+1. **Pairing.** In broker and rendezvous modes both peers run a PAKE (SPAKE2
+   over P-256) keyed by the code, whose secret is never sent to the broker or
+   server — so a malicious or compromised intermediary cannot derive the
+   session key or MITM the tunnel, and online guessing is bounded to one
+   attempt per code. In offline mode the copy-paste channel is the trust
+   anchor.
 2. **NAT traversal.** Each peer gathers ICE candidates (host, STUN-reflexive,
    TURN-relay) and they run connectivity checks to find a working path.
 3. **Encryption.** QUIC/TLS 1.3 runs over the chosen path. Each side pins the
@@ -125,10 +136,15 @@ See [docs/PROTOCOL.md](docs/PROTOCOL.md) for wire details.
 
 ## Security notes
 
-- Traffic is end-to-end encrypted; neither the rendezvous server nor the TURN
-  relay can read it.
-- Room codes are one-time, expire after ~10 minutes, and are burned on a failed
-  PAKE attempt; the server rate-limits room creation and joins per IP.
+- Traffic is end-to-end encrypted; no signaling broker, rendezvous server, or
+  TURN relay can read it, and none can MITM it (PAKE authenticates the code).
+- The public broker only ever sees ciphertext and a rendezvous topic derived
+  from the code (`HKDF(code)`), which is unguessable without the code itself.
+  It does learn both peers' IP addresses, as any signaling service would.
+- Codes are one-time; broker-mode codes are high-entropy (no server-side
+  rate-limiting backs them, so the code alone must resist guessing). Rendezvous
+  room codes additionally expire (~10 min), burn on a failed PAKE, and are
+  per-IP rate-limited by the server.
 - Run `xtunneld` behind TLS (`--tls-cert/--tls-key`, or a reverse proxy) so
   signaling metadata is encrypted in transit.
 - `--expose` is an allowlist: the host only ever dials the exact ports you name,
@@ -137,9 +153,13 @@ See [docs/PROTOCOL.md](docs/PROTOCOL.md) for wire details.
 ## Limitations (v1)
 
 - Networks that block UDP entirely have no path (QUIC needs UDP end to end).
-- Manual mode cannot auto-reconnect — a dropped tunnel needs fresh codes.
+- Broker and offline modes have no relay fallback (STUN only) and no
+  auto-reconnect — a dropped tunnel needs a fresh code. Use rendezvous mode for
+  relay + auto-reconnect.
 - pion/ice has no birthday-paradox probing, so a minority of symmetric-NAT
-  pairs fall back to the relay.
+  pairs fall back to the relay (rendezvous mode only).
+- The default public broker (ntfy.sh) is a third-party service; override it with
+  `--signal-url` or self-host if you need a reliability/privacy guarantee.
 
 ## Development
 

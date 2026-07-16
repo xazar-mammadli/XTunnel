@@ -92,3 +92,35 @@ func ValidCode(code string) bool {
 	code = strings.TrimSpace(code)
 	return len(code) <= 64 && codeRe.MatchString(code)
 }
+
+// pairingWordCount is how many words a broker-mode pairing code carries.
+// Broker mode has NO server-side room burning or rate limiting (the public
+// broker is a dumb relay), so the code alone must resist online guessing and
+// topic collision. Six words over the 128-word list is ~42 bits — the topic
+// (HKDF of the code) is unguessable and collisions between concurrent
+// pairings are negligible.
+const pairingWordCount = 6
+
+// pairingRe matches a broker-mode pairing code: only words (no nameplate).
+var pairingRe = regexp.MustCompile(`^[a-z]+(-[a-z]+){3,}$`)
+
+// NewPairingCode generates a high-entropy word-only code for broker mode. The
+// whole code is the PAKE password and, via HKDF, the rendezvous topic; there
+// is no server component, so it is fully client-generated and one-time.
+func NewPairingCode() (string, error) {
+	words := make([]string, pairingWordCount)
+	for i := range words {
+		w, err := rand.Int(rand.Reader, big.NewInt(int64(len(codeWords))))
+		if err != nil {
+			return "", err
+		}
+		words[i] = codeWords[w.Int64()]
+	}
+	return strings.Join(words, "-"), nil
+}
+
+// ValidPairingCode checks a broker-mode (word-only) pairing code.
+func ValidPairingCode(code string) bool {
+	code = strings.TrimSpace(code)
+	return len(code) <= 96 && pairingRe.MatchString(code)
+}

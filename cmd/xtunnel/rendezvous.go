@@ -129,8 +129,13 @@ func runJoin(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	// The code may sit between flags (e.g. `join --server X <code> -L ...`);
+	// take the first positional as the code and re-parse the flags after it.
 	if code == "" && fs.NArg() > 0 {
 		code = fs.Arg(0)
+		if err := fs.Parse(fs.Args()[1:]); err != nil {
+			return err
+		}
 	}
 	code = strings.TrimSpace(code)
 	if code == "" {
@@ -188,7 +193,7 @@ func runRendezvousLoop(
 	rf *rendezvousFlags,
 	serve func(context.Context, *peer.Session) error,
 ) error {
-	sc, err := sig.Secure(ctx, mb, code, isHost)
+	sc, err := sig.Secure(ctx, mb, code, isHost, sig.ModeRendezvous)
 	if err != nil {
 		return err
 	}

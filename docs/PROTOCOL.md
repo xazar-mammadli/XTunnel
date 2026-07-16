@@ -14,9 +14,30 @@ handshake is mutually authenticated.
 
 Fingerprints are delivered out of band:
 
-- **Manual mode:** inside the pairing blob (the copy-paste channel is the
+- **Offline mode:** inside the pairing blob (the copy-paste channel is the
   trust anchor).
-- **Rendezvous mode:** inside the PAKE-encrypted `hello` frame.
+- **Rendezvous and broker modes:** inside the PAKE-encrypted `hello` frame.
+
+## Signaling modes
+
+The PAKE transcript is `xtunnel/1|<mode>|<code>`, where `<mode>` is one of
+`rendezvous` or `broker`, so a code from one mode can never be replayed against
+the other.
+
+- **rendezvous** — via a self-hosted `xtunneld` mailbox (routing nameplate +
+  secret words; server-side one-time rooms, TTL, PAKE burn, rate limiting; TURN
+  relay fallback; auto-reconnect).
+- **broker** — via a public generic pub/sub broker (ntfy by default), used for
+  signaling only. The whole code is a single high-entropy one-time word phrase
+  (`NewPairingCode`, ~42 bits). The rendezvous topics are
+  `xt-<base32(HKDF(code,"xtunnel/broker/topic"))>-o` (offerer publishes) and
+  `-a` (answerer publishes); each side subscribes to the other's. Frames are
+  base64 (to stay UTF-8 and under the broker's message-size limit). No relay,
+  no auto-reconnect. The broker is untrusted: PAKE bounds it to one online
+  guess and it only sees ciphertext + topic + peer IPs.
+
+Both modes reuse the same `SecureChannel` (PAKE + AEAD frames) and the same
+connection-round protocol below; only the `Transport` differs.
 
 ## Roles
 

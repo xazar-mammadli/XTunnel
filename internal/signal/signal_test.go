@@ -68,10 +68,10 @@ func TestSecureChannelExchange(t *testing.T) {
 	}
 	hCh := make(chan res, 1)
 	go func() {
-		sc, err := signal.Secure(ctx, h, code, true)
+		sc, err := signal.Secure(ctx, h, code, true, signal.ModeRendezvous)
 		hCh <- res{sc, err}
 	}()
-	scJ, err := signal.Secure(ctx, j, code, false)
+	scJ, err := signal.Secure(ctx, j, code, false, signal.ModeRendezvous)
 	if err != nil {
 		t.Fatalf("join secure: %v", err)
 	}
@@ -147,11 +147,11 @@ func TestSecureChannelWrongCode(t *testing.T) {
 	}
 	hCh := make(chan res, 1)
 	go func() {
-		sc, err := signal.Secure(ctx, h, code, true)
+		sc, err := signal.Secure(ctx, h, code, true, signal.ModeRendezvous)
 		hCh <- res{sc, err}
 	}()
 	// Joiner uses a DIFFERENT code than the host.
-	scJ, jerr := signal.Secure(ctx, j, code+"-wrong", false)
+	scJ, jerr := signal.Secure(ctx, j, code+"-wrong", false, signal.ModeRendezvous)
 	hr := <-hCh
 
 	// PAKE derives keys regardless; the mismatch must surface no later than
@@ -185,8 +185,8 @@ func TestSecureDrainDiscardsBufferedFrames(t *testing.T) {
 		err error
 	}
 	hCh := make(chan res, 1)
-	go func() { sc, err := signal.Secure(ctx, h, code, true); hCh <- res{sc, err} }()
-	scJ, err := signal.Secure(ctx, j, code, false)
+	go func() { sc, err := signal.Secure(ctx, h, code, true, signal.ModeRendezvous); hCh <- res{sc, err} }()
+	scJ, err := signal.Secure(ctx, j, code, false, signal.ModeRendezvous)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,6 +282,29 @@ func TestCodeGeneration(t *testing.T) {
 	for _, bad := range []string{"", "zebra-comet", "1-Zebra-comet", "abc-a-b", strings.Repeat("1", 70)} {
 		if signal.ValidCode(bad) {
 			t.Errorf("ValidCode(%q) should be false", bad)
+		}
+	}
+}
+
+// TestPairingCodeGeneration checks the broker-mode (word-only) code generator.
+func TestPairingCodeGeneration(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 200; i++ {
+		c, err := signal.NewPairingCode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !signal.ValidPairingCode(c) {
+			t.Fatalf("generated pairing code %q fails ValidPairingCode", c)
+		}
+		if seen[c] {
+			t.Fatalf("duplicate pairing code %q — entropy too low", c)
+		}
+		seen[c] = true
+	}
+	for _, bad := range []string{"", "one-two", "42-apple-river", "APPLE-river-cedar-otter", strings.Repeat("a", 100)} {
+		if signal.ValidPairingCode(bad) {
+			t.Errorf("ValidPairingCode(%q) should be false", bad)
 		}
 	}
 }

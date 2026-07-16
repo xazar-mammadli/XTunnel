@@ -24,14 +24,30 @@ const pakeCurve = "p256"
 // stays silent cannot hang the other side indefinitely.
 const handshakeTimeout = 30 * time.Second
 
+// Signaling modes. The mode is bound into the PAKE transcript so a code from
+// one mode can never be replayed against the other.
+const (
+	ModeRendezvous = "rendezvous" // via a self-hosted xtunneld mailbox
+	ModeBroker     = "broker"     // via a public generic pub/sub broker
+)
+
 // ErrChannelClosed is returned by Recv once the read pump has stopped (mailbox
 // closed, decryption failure, or context cancellation).
 var ErrChannelClosed = errors.New("signaling channel closed")
 
-// transcript binds the protocol version and mode into the PAKE input so a
-// downgrade cannot go unnoticed.
-func transcript(code string) []byte {
-	return []byte("xtunnel/1|rendezvous|" + code)
+// Transport is the byte-oriented signaling carrier the SecureChannel runs
+// over. Both the xtunneld mailbox client (*Mailbox) and the public-broker
+// client implement it, so the same PAKE + AEAD machinery secures either.
+type Transport interface {
+	Send(ctx context.Context, body []byte) error
+	Recv(ctx context.Context) ([]byte, error)
+	Close() error
+}
+
+// transcript binds the protocol version and signaling mode into the PAKE
+// input so a downgrade or cross-mode replay cannot go unnoticed.
+func transcript(mode, code string) []byte {
+	return []byte("xtunnel/1|" + mode + "|" + code)
 }
 
 // SecureChannel is an AEAD-framed signaling channel over the mailbox, keyed by
@@ -42,7 +58,7 @@ func transcript(code string) []byte {
 // left over from an aborted round. A malicious server gets exactly one online
 // code guess — a wrong guess makes the first frame fail to decrypt.
 type SecureChannel struct {
-	mb *Mailbox
+	t Transport
 
 	sendMu   sync.Mutex
 	sendAEAD cipher.AEAD
@@ -71,12 +87,12 @@ type recvFrame struct {
 // The host must pass isHost=true (PAKE role 0, speaks first). ctx bounds the
 // channel's whole lifetime (the read pump runs until ctx is cancelled); the
 // PAKE exchange itself is additionally bounded by handshakeTimeout.
-func Secure(ctx context.Context, mb *Mailbox, code string, isHost bool) (*SecureChannel, error) {
+func Secure(ctx context.Context, t Transport, code string, isHost bool, mode string) (*SecureChannel, error) {
 	role := 1
 	if isHost {
 		role = 0
 	}
-	p, err := pake.InitCurve(transcript(code), role, pakeCurve)
+	p, err := pake.InitCurve(transcript(mode, code), role, pakeCurve)
 	if err != nil {
 		return nil, fmt.Errorf("init PAKE: %w", err)
 	}
@@ -85,10 +101,10 @@ func Secure(ctx context.Context, mb *Mailbox, code string, isHost bool) (*Secure
 	defer hcancel()
 
 	if isHost {
-		if err := mb.Send(hctx, p.Bytes()); err != nil {
+		if err := t.Send(hctx, p.Bytes()); err != nil {
 			return nil, err
 		}
-		reply, err := mb.Recv(hctx)
+		reply, err := t.Recv(hctx)
 		if err != nil {
 			return nil, err
 		}
@@ -96,14 +112,14 @@ func Secure(ctx context.Context, mb *Mailbox, code string, isHost bool) (*Secure
 			return nil, fmt.Errorf("PAKE failed (wrong code?): %w", err)
 		}
 	} else {
-		first, err := mb.Recv(hctx)
+		first, err := t.Recv(hctx)
 		if err != nil {
 			return nil, err
 		}
 		if err := p.Update(first); err != nil {
 			return nil, fmt.Errorf("PAKE failed (wrong code?): %w", err)
 		}
-		if err := mb.Send(hctx, p.Bytes()); err != nil {
+		if err := t.Send(hctx, p.Bytes()); err != nil {
 			return nil, err
 		}
 	}
@@ -130,7 +146,7 @@ func Secure(ctx context.Context, mb *Mailbox, code string, isHost bool) (*Secure
 		return nil, err
 	}
 
-	sc := &SecureChannel{mb: mb, frames: make(chan recvFrame, 64)}
+	sc := &SecureChannel{t: t, frames: make(chan recvFrame, 64)}
 	if isHost {
 		sc.sendAEAD, sc.recvAEAD = hostAEAD, joinAEAD
 	} else {
@@ -150,7 +166,7 @@ func nonceFor(ctr uint64) []byte {
 func (s *SecureChannel) pump(ctx context.Context) {
 	defer close(s.frames)
 	for {
-		body, err := s.mb.Recv(ctx)
+		body, err := s.t.Recv(ctx)
 		if err != nil {
 			s.setErr(err)
 			return
@@ -223,7 +239,7 @@ func (s *SecureChannel) Send(ctx context.Context, msgType string, payload any) e
 	binary.BigEndian.PutUint64(body, s.sendCtr)
 	body = s.sendAEAD.Seal(body, nonceFor(s.sendCtr), plain, body[:8])
 	s.sendCtr++
-	return s.mb.Send(ctx, body)
+	return s.t.Send(ctx, body)
 }
 
 // Recv returns the next decrypted signaling message, blocking until one is
@@ -266,4 +282,4 @@ func (s *SecureChannel) Drain() {
 }
 
 // Close closes the underlying mailbox, which unblocks the read pump.
-func (s *SecureChannel) Close() error { return s.mb.Close() }
+func (s *SecureChannel) Close() error { return s.t.Close() }

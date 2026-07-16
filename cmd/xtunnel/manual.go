@@ -16,6 +16,8 @@ import (
 	"github.com/xazar/xtunnel/internal/blob"
 	"github.com/xazar/xtunnel/internal/icewrap"
 	"github.com/xazar/xtunnel/internal/peer"
+	sig "github.com/xazar/xtunnel/internal/signal"
+	"github.com/xazar/xtunnel/internal/signal/broker"
 	"github.com/xazar/xtunnel/internal/xcrypto"
 )
 
@@ -26,14 +28,18 @@ type manualFlags struct {
 	gatherTimeout   time.Duration
 	pairTimeout     time.Duration
 	includeLoopback bool
+	offline         bool
+	signalURL       string
 }
 
 func (m *manualFlags) register(fs *flag.FlagSet) {
 	fs.Var(&m.stun, "stun", "STUN server URI (repeatable)")
 	fs.Var(&m.turn, "turn", "TURN relay as url,username,password (repeatable)")
 	fs.DurationVar(&m.gatherTimeout, "gather-timeout", 3*time.Second, "candidate gathering deadline")
-	fs.DurationVar(&m.pairTimeout, "pair-timeout", 3*time.Minute, "window for completing the code exchange")
+	fs.DurationVar(&m.pairTimeout, "pair-timeout", 3*time.Minute, "window for completing the pairing")
 	fs.BoolVar(&m.includeLoopback, "include-loopback", false, "gather loopback candidates (same-machine testing)")
+	fs.BoolVar(&m.offline, "offline", false, "use offline two-way copy-paste blobs instead of a public signaling broker")
+	fs.StringVar(&m.signalURL, "signal-url", broker.DefaultURL, "public pub/sub broker used only for signaling (not the tunnel)")
 }
 
 func (m *manualFlags) stunServers() []string {
@@ -117,6 +123,32 @@ func runOffer(args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	if !mf.offline {
+		return runOfferBroker(ctx, expose, &mf)
+	}
+	return runOfferOffline(ctx, expose, &mf)
+}
+
+// runOfferBroker pairs via a public signaling broker with a single short code.
+func runOfferBroker(ctx context.Context, expose portList, mf *manualFlags) error {
+	code, err := sig.NewPairingCode()
+	if err != nil {
+		return err
+	}
+	log.Printf("pairing code — run this on the other machine:")
+	fmt.Printf("\n    xtunnel answer %s -L <localport>:%d\n\n", code, expose[0])
+	log.Printf("connecting via %s (signaling only; the tunnel stays peer-to-peer)...", mf.signalURL)
+
+	sess, ep, err := brokerPair(ctx, code, true, mf)
+	if err != nil {
+		return err
+	}
+	defer ep.Close()
+	printPath(ep)
+	return serveAsHost(ctx, sess, expose)
+}
+
+func runOfferOffline(ctx context.Context, expose portList, mf *manualFlags) error {
 	seed, err := blob.NewSeed()
 	if err != nil {
 		return err
@@ -125,7 +157,7 @@ func runOffer(args []string) error {
 	if err != nil {
 		return err
 	}
-	ep, packed, err := manualEndpoint(ctx, seed, &mf)
+	ep, packed, err := manualEndpoint(ctx, seed, mf)
 	if err != nil {
 		return err
 	}
@@ -183,9 +215,16 @@ func runAnswer(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	// The code may sit between flags (e.g. `answer --offline <code> -L ...`);
+	// Go's flag parser stops at the first positional, so take it as the code
+	// and re-parse the flags that follow it.
 	if code == "" && fs.NArg() > 0 {
 		code = fs.Arg(0)
+		if err := fs.Parse(fs.Args()[1:]); err != nil {
+			return err
+		}
 	}
+	code = strings.TrimSpace(code)
 	if code == "" {
 		return errors.New("usage: xtunnel answer <pairing-code> -L <local:remote>")
 	}
@@ -193,6 +232,30 @@ func runAnswer(args []string) error {
 		return errors.New("at least one -L <local:remote> is required")
 	}
 
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	// Dispatch by code shape: an "xt1_" blob is offline copy-paste; a word-only
+	// code is a broker-mode pairing code.
+	if !strings.HasPrefix(code, blob.Prefix) && sig.ValidPairingCode(code) {
+		return runAnswerBroker(ctx, code, forwards, &mf)
+	}
+	return runAnswerOffline(ctx, code, forwards, &mf)
+}
+
+// runAnswerBroker pairs via a public signaling broker using a shared code.
+func runAnswerBroker(ctx context.Context, code string, forwards forwardList, mf *manualFlags) error {
+	log.Printf("connecting via %s (signaling only; the tunnel stays peer-to-peer)...", mf.signalURL)
+	sess, ep, err := brokerPair(ctx, code, false, mf)
+	if err != nil {
+		return err
+	}
+	defer ep.Close()
+	printPath(ep)
+	return serveAsJoiner(ctx, sess, forwards)
+}
+
+func runAnswerOffline(ctx context.Context, code string, forwards forwardList, mf *manualFlags) error {
 	off, err := blob.Decode(code)
 	if err != nil {
 		return err
@@ -200,9 +263,6 @@ func runAnswer(args []string) error {
 	if off.IsAnswer {
 		return errors.New("that is a reply code; pass the OFFER code to 'xtunnel answer'")
 	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 
 	seed, err := blob.NewSeed()
 	if err != nil {
@@ -212,7 +272,7 @@ func runAnswer(args []string) error {
 	if err != nil {
 		return err
 	}
-	ep, packed, err := manualEndpoint(ctx, seed, &mf)
+	ep, packed, err := manualEndpoint(ctx, seed, mf)
 	if err != nil {
 		return err
 	}
@@ -247,6 +307,36 @@ func runAnswer(args []string) error {
 		return fmt.Errorf("QUIC handshake: %w", err)
 	}
 	return serveAsJoiner(ctx, sess, forwards)
+}
+
+// brokerPair runs the broker-mode pairing: PAKE over the public broker, then
+// one connection round (candidate exchange + ICE + QUIC). No relay and no
+// auto-reconnect — a dropped tunnel needs a fresh code. isHost is the offerer.
+func brokerPair(ctx context.Context, code string, isHost bool, mf *manualFlags) (*peer.Session, *icewrap.Endpoint, error) {
+	tr, err := broker.Dial(ctx, mf.signalURL, code, isHost)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	pctx, pcancel := context.WithTimeout(ctx, mf.pairTimeout)
+	defer pcancel()
+
+	sc, err := sig.Secure(pctx, tr, code, isHost, sig.ModeBroker)
+	if err != nil {
+		_ = tr.Close()
+		return nil, nil, fmt.Errorf("pairing handshake failed (wrong code, or the other side not ready): %w", err)
+	}
+
+	rf := &rendezvousFlags{stun: mf.stun, includeLoopback: mf.includeLoopback}
+	rl := &rendezvousLoop{sc: sc, rf: rf, turns: nil, isHost: isHost}
+	sess, ep, err := rl.round(pctx)
+	if err != nil {
+		_ = sc.Close()
+		return nil, nil, err
+	}
+	// Signaling is complete; the tunnel is direct peer-to-peer now.
+	_ = sc.Close()
+	return sess, ep, nil
 }
 
 // readBlobFromStdin reads one pairing code line from stdin, honoring ctx.
