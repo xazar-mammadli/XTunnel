@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xazar/xtunnel/internal/icewrap"
-	"github.com/xazar/xtunnel/internal/xcrypto"
+	"github.com/xazar-mammadli/XTunnel/internal/icewrap"
+	"github.com/xazar-mammadli/XTunnel/internal/xcrypto"
 )
 
 func newLoopbackEndpoint(t *testing.T) *icewrap.Endpoint {
@@ -26,8 +26,6 @@ func newLoopbackEndpoint(t *testing.T) *icewrap.Endpoint {
 	return ep
 }
 
-// crossWire exchanges credentials and full candidate sets between a and b,
-// then runs Dial/Accept concurrently. a is controlling.
 func crossWire(t *testing.T, ctx context.Context, a, b *icewrap.Endpoint) (ca, cb net.Conn) {
 	t.Helper()
 
@@ -88,8 +86,6 @@ func crossWire(t *testing.T, ctx context.Context, a, b *icewrap.Endpoint) (ca, c
 	return ra.conn, rb.conn
 }
 
-// establishSessions runs the full stack: ICE pair + QUIC handshake with
-// mutual fingerprint pinning. Returns the controlling and controlled session.
 func establishSessions(t *testing.T, ctx context.Context) (ctrl, ctrld *Session) {
 	t.Helper()
 
@@ -131,8 +127,6 @@ func establishSessions(t *testing.T, ctx context.Context) (ctrl, ctrld *Session)
 	return ra.s, rb.s
 }
 
-// TestQUICOverICE is the M1 spike: loopback ICE pair, QUIC/TLS 1.3 handshake,
-// then a 32 MiB integrity-checked transfer with throughput measurement.
 func TestQUICOverICE(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -196,7 +190,6 @@ func TestQUICOverICE(t *testing.T) {
 	}
 }
 
-// TestFingerprintMismatchRejected proves a wrong pin kills the handshake.
 func TestFingerprintMismatchRejected(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -221,8 +214,6 @@ func TestFingerprintMismatchRejected(t *testing.T) {
 
 	aCh := make(chan error, 1)
 	go func() {
-		// Controlling side pins the CORRECT fingerprint; the controlled side
-		// pins a bogus client fingerprint and must abort the handshake.
 		s, err := EstablishQUIC(hctx, iceA, true, certA, fpB)
 		if s != nil {
 			_ = s.Close()

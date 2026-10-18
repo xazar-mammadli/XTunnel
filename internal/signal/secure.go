@@ -16,47 +16,26 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
-// pakeCurve: P-256 explicitly — schollz/pake's default SIEC curve is exotic
-// and unreviewed; P-256 is the conservative choice.
-const pakeCurve = "p256"
-
-// handshakeTimeout bounds the PAKE exchange so a peer that connects and then
-// stays silent cannot hang the other side indefinitely.
-const handshakeTimeout = 30 * time.Second
-
-// Signaling modes. The mode is bound into the PAKE transcript so a code from
-// one mode can never be replayed against the other.
 const (
-	ModeRendezvous = "rendezvous" // via a self-hosted xtunneld mailbox
-	ModeBroker     = "broker"     // via a public generic pub/sub broker
+	pakeCurve        = "p256"
+	handshakeTimeout = 30 * time.Second
 )
 
-// ErrChannelClosed is returned by Recv once the read pump has stopped (mailbox
-// closed, decryption failure, or context cancellation).
-var ErrChannelClosed = errors.New("signaling channel closed")
+var (
+	ErrChannelClosed = errors.New("signaling channel closed")
+	ErrWrongCode     = errors.New("wrong code")
+)
 
-// Transport is the byte-oriented signaling carrier the SecureChannel runs
-// over. Both the xtunneld mailbox client (*Mailbox) and the public-broker
-// client implement it, so the same PAKE + AEAD machinery secures either.
 type Transport interface {
 	Send(ctx context.Context, body []byte) error
 	Recv(ctx context.Context) ([]byte, error)
 	Close() error
 }
 
-// transcript binds the protocol version and signaling mode into the PAKE
-// input so a downgrade or cross-mode replay cannot go unnoticed.
-func transcript(mode, code string) []byte {
-	return []byte("xtunnel/1|" + mode + "|" + code)
+func transcript(code string) []byte {
+	return []byte("xtunnel/1|" + code)
 }
 
-// SecureChannel is an AEAD-framed signaling channel over the mailbox, keyed by
-// a PAKE run on the full pairing code. A read pump owns all mailbox reads for
-// the channel's lifetime: it decrypts inbound frames onto a buffered channel,
-// which (a) lets Keepalive pings have their pongs processed even while no round
-// is actively receiving, and (b) lets a reconnect round drain stale frames
-// left over from an aborted round. A malicious server gets exactly one online
-// code guess — a wrong guess makes the first frame fail to decrypt.
 type SecureChannel struct {
 	t Transport
 
@@ -72,7 +51,6 @@ type SecureChannel struct {
 	pumpErr error
 }
 
-// frame is the plaintext inside each AEAD envelope.
 type frame struct {
 	T string          `json:"t"`
 	D json.RawMessage `json:"d,omitempty"`
@@ -83,16 +61,12 @@ type recvFrame struct {
 	d json.RawMessage
 }
 
-// Secure runs the PAKE over the mailbox and returns the encrypted channel.
-// The host must pass isHost=true (PAKE role 0, speaks first). ctx bounds the
-// channel's whole lifetime (the read pump runs until ctx is cancelled); the
-// PAKE exchange itself is additionally bounded by handshakeTimeout.
-func Secure(ctx context.Context, t Transport, code string, isHost bool, mode string) (*SecureChannel, error) {
+func Secure(ctx context.Context, t Transport, code string, isHost bool) (*SecureChannel, error) {
 	role := 1
 	if isHost {
 		role = 0
 	}
-	p, err := pake.InitCurve(transcript(mode, code), role, pakeCurve)
+	p, err := pake.InitCurve(transcript(code), role, pakeCurve)
 	if err != nil {
 		return nil, fmt.Errorf("init PAKE: %w", err)
 	}
@@ -109,7 +83,7 @@ func Secure(ctx context.Context, t Transport, code string, isHost bool, mode str
 			return nil, err
 		}
 		if err := p.Update(reply); err != nil {
-			return nil, fmt.Errorf("PAKE failed (wrong code?): %w", err)
+			return nil, fmt.Errorf("pairing handshake failed: %w", err)
 		}
 	} else {
 		first, err := t.Recv(hctx)
@@ -117,7 +91,7 @@ func Secure(ctx context.Context, t Transport, code string, isHost bool, mode str
 			return nil, err
 		}
 		if err := p.Update(first); err != nil {
-			return nil, fmt.Errorf("PAKE failed (wrong code?): %w", err)
+			return nil, fmt.Errorf("pairing handshake failed: %w", err)
 		}
 		if err := t.Send(hctx, p.Bytes()); err != nil {
 			return nil, err
@@ -162,7 +136,6 @@ func nonceFor(ctr uint64) []byte {
 	return n
 }
 
-// pump reads, decrypts, and buffers inbound frames for the channel's lifetime.
 func (s *SecureChannel) pump(ctx context.Context) {
 	defer close(s.frames)
 	for {
@@ -182,7 +155,7 @@ func (s *SecureChannel) pump(ctx context.Context) {
 		}
 		plain, err := s.recvAEAD.Open(nil, nonceFor(ctr), body[8:], body[:8])
 		if err != nil {
-			s.setErr(errors.New("signaling decryption failed — wrong room code or tampering; aborting"))
+			s.setErr(ErrWrongCode)
 			return
 		}
 		s.recvCtr++
@@ -209,6 +182,12 @@ func (s *SecureChannel) setErr(err error) {
 	s.errMu.Unlock()
 }
 
+func (s *SecureChannel) Err() error {
+	s.errMu.Lock()
+	defer s.errMu.Unlock()
+	return s.pumpErr
+}
+
 func (s *SecureChannel) err() error {
 	s.errMu.Lock()
 	defer s.errMu.Unlock()
@@ -218,7 +197,6 @@ func (s *SecureChannel) err() error {
 	return ErrChannelClosed
 }
 
-// Send encrypts and relays one typed signaling message.
 func (s *SecureChannel) Send(ctx context.Context, msgType string, payload any) error {
 	var raw json.RawMessage
 	if payload != nil {
@@ -242,8 +220,6 @@ func (s *SecureChannel) Send(ctx context.Context, msgType string, payload any) e
 	return s.t.Send(ctx, body)
 }
 
-// Recv returns the next decrypted signaling message, blocking until one is
-// available, ctx is cancelled, or the channel closes.
 func (s *SecureChannel) Recv(ctx context.Context) (string, json.RawMessage, error) {
 	select {
 	case f, ok := <-s.frames:
@@ -256,9 +232,6 @@ func (s *SecureChannel) Recv(ctx context.Context) (string, json.RawMessage, erro
 	}
 }
 
-// TryRecv returns a buffered frame without blocking. ok is false if none is
-// immediately available (or the channel has closed). Used to drain stale
-// frames from aborted reconnect rounds.
 func (s *SecureChannel) TryRecv() (msgType string, payload json.RawMessage, ok bool) {
 	select {
 	case f, chOK := <-s.frames:
@@ -271,8 +244,6 @@ func (s *SecureChannel) TryRecv() (msgType string, payload json.RawMessage, ok b
 	}
 }
 
-// Drain discards every currently-buffered frame. Called at the start of a
-// reconnect round to clear stragglers left by an aborted round.
 func (s *SecureChannel) Drain() {
 	for {
 		if _, _, ok := s.TryRecv(); !ok {
@@ -281,5 +252,4 @@ func (s *SecureChannel) Drain() {
 	}
 }
 
-// Close closes the underlying mailbox, which unblocks the read pump.
 func (s *SecureChannel) Close() error { return s.t.Close() }

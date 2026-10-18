@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,11 +15,9 @@ import (
 
 	"github.com/quic-go/quic-go"
 
-	"github.com/xazar/xtunnel/internal/xcrypto"
+	"github.com/xazar-mammadli/XTunnel/internal/xcrypto"
 )
 
-// quicPair establishes a QUIC connection over real loopback UDP sockets.
-// clientConn plays the host role (it opens the control stream).
 func quicPair(t *testing.T, ctx context.Context) (clientConn, serverConn *quic.Conn) {
 	t.Helper()
 
@@ -72,8 +71,6 @@ func quicPair(t *testing.T, ctx context.Context) (clientConn, serverConn *quic.C
 	return cc, sc
 }
 
-// startEchoServer runs a TCP server that echoes everything until EOF, then
-// closes its write side. Returns the bound port.
 func startEchoServer(t *testing.T) uint16 {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -111,9 +108,6 @@ func setupTunnel(t *testing.T, ctx context.Context, exposed []uint16, forwards [
 	return j
 }
 
-// TestEchoRoundTrip: full path TCP client -> joiner listener -> QUIC stream ->
-// host -> echo server, with half-close semantics (client sends EOF, still
-// receives the full echo back).
 func TestEchoRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -143,7 +137,7 @@ func TestEchoRoundTrip(t *testing.T) {
 			t.Errorf("write: %v", err)
 			return
 		}
-		_ = c.(*net.TCPConn).CloseWrite() // half-close: EOF must travel end to end
+		_ = c.(*net.TCPConn).CloseWrite()
 	}()
 
 	got, err := io.ReadAll(c)
@@ -156,8 +150,6 @@ func TestEchoRoundTrip(t *testing.T) {
 	}
 }
 
-// TestConcurrentConnections exercises many simultaneous streams over one
-// QUIC connection and two different exposed ports.
 func TestConcurrentConnections(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -209,8 +201,6 @@ func TestConcurrentConnections(t *testing.T) {
 	}
 }
 
-// TestPortRefused: a port outside the exposed set must be rejected and the
-// client TCP connection must close promptly without data.
 func TestPortRefused(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -234,17 +224,69 @@ func TestPortRefused(t *testing.T) {
 	}
 }
 
-// TestRegistryAdvertised verifies the joiner sees the host's exposed ports.
-func TestRegistryAdvertised(t *testing.T) {
+func freePort(t *testing.T) uint16 {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	return uint16(ln.Addr().(*net.TCPAddr).Port)
+}
+
+func TestRegistryAndSamePortForwarding(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	p1 := startEchoServer(t)
-	p2 := startEchoServer(t)
+	p1, p2 := freePort(t), freePort(t)
 	j := setupTunnel(t, ctx, []uint16{p1, p2}, nil)
 
 	got := j.RemotePorts()
 	if len(got) != 2 || got[0] != p1 || got[1] != p2 {
 		t.Fatalf("registry mismatch: got %v want [%d %d]", got, p1, p2)
+	}
+	addrs := j.Addrs()
+	for i, want := range []uint16{p1, p2} {
+		if addrs[i].(*net.TCPAddr).Port != int(want) {
+			t.Fatalf("forward %d listens on %v, want port %d", i, addrs[i], want)
+		}
+	}
+}
+
+func TestSamePortForwards(t *testing.T) {
+	got := SamePortForwards([]uint16{5432, 8080})
+	want := []Forward{{Listen: "127.0.0.1:5432", Port: 5432}, {Listen: "127.0.0.1:8080", Port: 8080}}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("forward %d: got %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestStartJoinListenError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+	busyAddr := busy.Addr().String()
+
+	echoPort := startEchoServer(t)
+	hostConn, joinConn := quicPair(t, ctx)
+	go func() { _ = ServeHost(ctx, hostConn, []uint16{echoPort}, t.Logf) }()
+
+	_, err = StartJoin(ctx, joinConn, []Forward{{Listen: busyAddr, Port: echoPort}}, t.Logf)
+	var le *ListenError
+	if !errors.As(err, &le) {
+		t.Fatalf("expected ListenError, got %v", err)
+	}
+	if le.Addr != busyAddr || le.Port != echoPort {
+		t.Fatalf("ListenError fields: %+v", le)
 	}
 }

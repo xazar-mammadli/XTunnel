@@ -1,7 +1,3 @@
-// Package icewrap wraps pion/ice with the small surface xtunnel needs:
-// gather candidates (trickled or all at once), exchange them over any
-// signaling channel, and establish a single ice.Conn between two peers.
-// It also adapts the established conn to net.PacketConn for quic-go.
 package icewrap
 
 import (
@@ -14,40 +10,27 @@ import (
 	"github.com/pion/stun/v3"
 )
 
-// TURNServer describes one TURN relay with credentials.
 type TURNServer struct {
-	// URL in stun URI form, e.g. "turn:relay.example.com:3478?transport=udp".
 	URL      string
 	Username string
 	Password string
 }
 
-// Config controls candidate gathering and connectivity behavior.
 type Config struct {
-	// STUNServers in URI form, e.g. "stun:stun.l.google.com:19302".
 	STUNServers []string
-	// TURNServers to gather relay candidates from (relay fallback).
 	TURNServers []TURNServer
 
-	// LocalUfrag/LocalPwd pin the local ICE credentials. Both empty means
-	// random credentials (rendezvous mode); both set is used by manual mode
-	// where credentials are derived from the blob seed.
 	LocalUfrag string
 	LocalPwd   string
 
-	// RelayOnly restricts gathering to relay candidates (forced-relay test mode).
-	RelayOnly bool
-	// IncludeLoopback admits loopback interfaces; used in tests.
+	RelayOnly       bool
 	IncludeLoopback bool
-	// UDP4Only restricts gathering to IPv4; used in tests for determinism.
-	UDP4Only bool
+	UDP4Only        bool
 
-	// DisconnectedTimeout / FailedTimeout override pion defaults (5s / 25s).
 	DisconnectedTimeout time.Duration
 	FailedTimeout       time.Duration
 }
 
-// Endpoint owns one ICE agent for the lifetime of one peer connection.
 type Endpoint struct {
 	agent *ice.Agent
 
@@ -56,8 +39,6 @@ type Endpoint struct {
 	gathering  bool
 }
 
-// New builds the underlying agent. Call StartGather before consuming
-// Candidates or GatherAll.
 func New(cfg Config) (*Endpoint, error) {
 	var urls []*stun.URI
 	for _, s := range cfg.STUNServers {
@@ -111,13 +92,10 @@ func New(cfg Config) (*Endpoint, error) {
 	}, nil
 }
 
-// Credentials returns the local ufrag/pwd to send to the remote peer.
 func (e *Endpoint) Credentials() (ufrag, pwd string, err error) {
 	return e.agent.GetLocalUserCredentials()
 }
 
-// StartGather begins candidate gathering. Discovered candidates are delivered
-// on Candidates; the channel is closed when gathering completes.
 func (e *Endpoint) StartGather() error {
 	if e.gathering {
 		return errors.New("gathering already started")
@@ -132,8 +110,6 @@ func (e *Endpoint) StartGather() error {
 		select {
 		case e.candCh <- c:
 		default:
-			// Channel full: drop rather than block pion's internal loop.
-			// 32 slots is far beyond any realistic candidate count.
 		}
 	}); err != nil {
 		return fmt.Errorf("set candidate handler: %w", err)
@@ -144,12 +120,8 @@ func (e *Endpoint) StartGather() error {
 	return nil
 }
 
-// Candidates streams trickled local candidates. Closed when gathering ends.
 func (e *Endpoint) Candidates() <-chan ice.Candidate { return e.candCh }
 
-// GatherAll starts gathering (if needed) and blocks until it completes or ctx
-// expires, returning every discovered candidate. Used by manual mode where
-// the full set must be embedded in one blob.
 func (e *Endpoint) GatherAll(ctx context.Context) ([]ice.Candidate, error) {
 	if !e.gathering {
 		if err := e.StartGather(); err != nil {
@@ -165,8 +137,6 @@ func (e *Endpoint) GatherAll(ctx context.Context) ([]ice.Candidate, error) {
 			}
 			out = append(out, c)
 		case <-ctx.Done():
-			// Timed out waiting for the full gather (e.g. unreachable STUN
-			// server). Return what we have — partial candidates still work.
 			for {
 				select {
 				case c, ok := <-e.candCh:
@@ -182,8 +152,6 @@ func (e *Endpoint) GatherAll(ctx context.Context) ([]ice.Candidate, error) {
 	}
 }
 
-// AddRemoteCandidate registers a candidate received from the remote peer,
-// in the SDP attribute form produced by ice.Candidate.Marshal().
 func (e *Endpoint) AddRemoteCandidate(raw string) error {
 	c, err := ice.UnmarshalCandidate(raw)
 	if err != nil {
@@ -192,31 +160,24 @@ func (e *Endpoint) AddRemoteCandidate(raw string) error {
 	return e.agent.AddRemoteCandidate(c)
 }
 
-// AddRemoteCandidateObj registers an already-constructed remote candidate
-// (used by manual mode, which rebuilds candidates from blob form).
 func (e *Endpoint) AddRemoteCandidateObj(c ice.Candidate) error {
 	return e.agent.AddRemoteCandidate(c)
 }
 
-// Dial runs connectivity checks as the controlling agent.
 func (e *Endpoint) Dial(ctx context.Context, remoteUfrag, remotePwd string) (*ice.Conn, error) {
 	return e.agent.Dial(ctx, remoteUfrag, remotePwd)
 }
 
-// Accept runs connectivity checks as the controlled agent.
 func (e *Endpoint) Accept(ctx context.Context, remoteUfrag, remotePwd string) (*ice.Conn, error) {
 	return e.agent.Accept(ctx, remoteUfrag, remotePwd)
 }
 
-// OnConnectionStateChange forwards pion's state callbacks (logging/UX).
 func (e *Endpoint) OnConnectionStateChange(f func(ice.ConnectionState)) error {
 	return e.agent.OnConnectionStateChange(f)
 }
 
-// SelectedPair reports the nominated candidate pair, nil before nomination.
 func (e *Endpoint) SelectedPair() (*ice.CandidatePair, error) {
 	return e.agent.GetSelectedCandidatePair()
 }
 
-// Close releases the agent and every gathered socket.
 func (e *Endpoint) Close() error { return e.agent.Close() }

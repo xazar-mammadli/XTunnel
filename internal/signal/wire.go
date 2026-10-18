@@ -1,61 +1,25 @@
-// Package signal implements xtunnel's rendezvous signaling: a WebSocket
-// mailbox protocol (shared by client and xtunneld server), a PAKE handshake
-// keyed by the room code, and an AEAD-encrypted framing on top so the server
-// relays only ciphertext.
 package signal
 
-// Envelope is the plaintext mailbox protocol between a peer and xtunneld.
-// The server never sees inside Body: it is PAKE/AEAD protected.
 type Envelope struct {
-	// Type is one of:
-	//   client -> server: "create", "join", "msg"
-	//   server -> client: "created", "joined", "peer", "msg", "peer-left", "error"
-	Type string `json:"type"`
-	Room string `json:"room,omitempty"`
-	Body []byte `json:"body,omitempty"`
-	Err  string `json:"error,omitempty"`
-	// TURN carries ephemeral relay credentials issued by the server on
-	// "created"/"joined". Not secret from the server (it runs the relay);
-	// the mailbox connection's TLS protects them on the wire.
-	TURN []TURNCred `json:"turn,omitempty"`
+	Type      string     `json:"type"`
+	Room      string     `json:"room,omitempty"`
+	Body      []byte     `json:"body,omitempty"`
+	Err       string     `json:"error,omitempty"`
+	TURN      []TURNCred `json:"turn,omitempty"`
+	Reconnect bool       `json:"reconnect,omitempty"`
 }
 
-// Signaling message types carried inside encrypted frames.
-const (
-	MsgHello = "hello" // first frame in each direction; doubles as PAKE key confirmation
-	MsgCand  = "cand"  // one trickled ICE candidate
-	MsgTURN  = "turn"  // ephemeral TURN credentials issued by the host side
-)
+const MsgHello = "hello"
 
-// Hello is each side's per-round signaling frame. It carries everything the
-// peer needs to attempt one connection: the session cert fingerprint, the ICE
-// credentials, and the full (non-trickled) candidate set. Bundling candidates
-// makes each connect/reconnect round atomic over the mailbox.
 type Hello struct {
-	// FP is the hex SHA-256 fingerprint of this peer's session TLS cert.
-	FP string `json:"fp"`
-	// Ufrag/Pwd are this peer's local ICE credentials.
-	Ufrag string `json:"ufrag"`
-	Pwd   string `json:"pwd"`
-	// Cands are this peer's ICE candidates in SDP attribute form.
+	FP    string   `json:"fp"`
+	Ufrag string   `json:"ufrag"`
+	Pwd   string   `json:"pwd"`
 	Cands []string `json:"cands,omitempty"`
-	// Rid identifies the connection round. The joiner picks a fresh Rid per
-	// round; the host echoes it in its reply. This lets each side reject a
-	// stale Hello left buffered by an aborted round, so the reconnect loop
-	// never desyncs. Reply distinguishes the host's response from the joiner's
-	// opener.
-	Rid   string `json:"rid,omitempty"`
-	Reply bool   `json:"reply,omitempty"`
+	Rid   string   `json:"rid,omitempty"`
+	Reply bool     `json:"reply,omitempty"`
 }
 
-// Cand carries one ICE candidate in SDP attribute form.
-type Cand struct {
-	C string `json:"c"`
-	// End marks the end of trickling (no candidate attached).
-	End bool `json:"end,omitempty"`
-}
-
-// TURNCred delivers ephemeral relay credentials (filled in by xtunneld).
 type TURNCred struct {
 	URL      string `json:"url"`
 	Username string `json:"username"`

@@ -1,12 +1,17 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"fmt"
+	"io"
+	"os"
 	"strconv"
 	"strings"
+	"time"
 
-	"github.com/xazar/xtunnel/internal/icewrap"
-	"github.com/xazar/xtunnel/internal/tunnel"
+	"github.com/xazar-mammadli/XTunnel/internal/icewrap"
+	"github.com/xazar-mammadli/XTunnel/internal/tunnel"
 )
 
 var defaultSTUN = []string{
@@ -14,43 +19,105 @@ var defaultSTUN = []string{
 	"stun:stun.cloudflare.com:3478",
 }
 
-// portList implements flag.Value for repeatable --expose flags.
-type portList []uint16
+var errHelp = errors.New("help requested")
 
-func (l *portList) String() string {
-	parts := make([]string, len(*l))
-	for i, p := range *l {
-		parts[i] = strconv.Itoa(int(p))
-	}
-	return strings.Join(parts, ",")
+type usageError string
+
+func (e usageError) Error() string { return string(e) }
+
+type options struct {
+	server          string
+	offline         bool
+	timeout         time.Duration
+	stun            stringList
+	turn            turnList
+	noRetry         bool
+	verbose         bool
+	includeLoopback bool
+	forceRelay      bool
 }
 
-func (l *portList) Set(s string) error {
-	p, err := parsePort(s)
-	if err != nil {
-		return err
-	}
-	*l = append(*l, p)
-	return nil
+func newFlagSet(name string, o *options) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&o.server, "server", "", "")
+	fs.BoolVar(&o.offline, "offline", false, "")
+	fs.DurationVar(&o.timeout, "timeout", 10*time.Minute, "")
+	fs.Var(&o.stun, "stun", "")
+	fs.Var(&o.turn, "turn", "")
+	fs.BoolVar(&o.noRetry, "no-retry", false, "")
+	fs.BoolVar(&o.verbose, "v", false, "")
+	fs.BoolVar(&o.includeLoopback, "include-loopback", false, "")
+	fs.BoolVar(&o.forceRelay, "force-relay", false, "")
+	return fs
 }
 
-// forwardList implements flag.Value for repeatable -L flags.
-// Accepted forms:
-//
-//	-L 8080                  127.0.0.1:8080 -> peer:8080
-//	-L 15432:5432            127.0.0.1:15432 -> peer:5432
-//	-L 0.0.0.0:8080:80       0.0.0.0:8080 -> peer:80
-type forwardList []tunnel.Forward
-
-func (l *forwardList) String() string {
-	parts := make([]string, len(*l))
-	for i, f := range *l {
-		parts[i] = fmt.Sprintf("%s:%d", f.Listen, f.Port)
+func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return nil, errHelp
+			}
+			return nil, usageError(err.Error())
+		}
+		rest := fs.Args()
+		if len(rest) == 0 {
+			return positional, nil
+		}
+		positional = append(positional, rest[0])
+		args = rest[1:]
 	}
-	return strings.Join(parts, ",")
 }
 
-func (l *forwardList) Set(s string) error {
+func (o *options) serverURL() (string, error) {
+	switch {
+	case o.server != "":
+		return o.server, nil
+	case os.Getenv("XTUNNEL_SERVER") != "":
+		return os.Getenv("XTUNNEL_SERVER"), nil
+	case defaultServer != "":
+		return defaultServer, nil
+	}
+	return "", usageError("no signaling server configured: use --server <url>, set XTUNNEL_SERVER, or pair with --offline")
+}
+
+func (o *options) stunServers() []string {
+	if o.stun != nil {
+		return o.stun
+	}
+	return defaultSTUN
+}
+
+func parsePorts(args []string) ([]uint16, error) {
+	ports := make([]uint16, 0, len(args))
+	seen := make(map[uint16]bool, len(args))
+	for _, a := range args {
+		p, err := parsePort(a)
+		if err != nil {
+			return nil, err
+		}
+		if !seen[p] {
+			seen[p] = true
+			ports = append(ports, p)
+		}
+	}
+	return ports, nil
+}
+
+func parseForwards(args []string) ([]tunnel.Forward, error) {
+	forwards := make([]tunnel.Forward, 0, len(args))
+	for _, a := range args {
+		f, err := parseForward(a)
+		if err != nil {
+			return nil, err
+		}
+		forwards = append(forwards, f)
+	}
+	return forwards, nil
+}
+
+func parseForward(s string) (tunnel.Forward, error) {
 	parts := strings.Split(s, ":")
 	var bind, local, remote string
 	switch len(parts) {
@@ -61,30 +128,32 @@ func (l *forwardList) Set(s string) error {
 	case 3:
 		bind, local, remote = parts[0], parts[1], parts[2]
 	default:
-		return fmt.Errorf("invalid forward spec %q (want [bind:]local:remote or port)", s)
+		return tunnel.Forward{}, usageError(fmt.Sprintf("invalid forward %q (want port, local:remote or bind:local:remote)", s))
 	}
 	lp, err := parsePort(local)
 	if err != nil {
-		return fmt.Errorf("forward spec %q: %w", s, err)
+		return tunnel.Forward{}, err
 	}
 	rp, err := parsePort(remote)
 	if err != nil {
-		return fmt.Errorf("forward spec %q: %w", s, err)
+		return tunnel.Forward{}, err
 	}
-	*l = append(*l, tunnel.Forward{
-		Listen: fmt.Sprintf("%s:%d", bind, lp),
-		Port:   rp,
-	})
-	return nil
+	return tunnel.Forward{Listen: fmt.Sprintf("%s:%d", bind, lp), Port: rp}, nil
 }
 
-// stringList implements flag.Value for repeatable string flags (--stun).
+func parsePort(s string) (uint16, error) {
+	n, err := strconv.ParseUint(strings.TrimSpace(s), 10, 16)
+	if err != nil || n == 0 {
+		return 0, usageError(fmt.Sprintf("invalid port %q", s))
+	}
+	return uint16(n), nil
+}
+
 type stringList []string
 
 func (l *stringList) String() string     { return strings.Join(*l, ",") }
 func (l *stringList) Set(s string) error { *l = append(*l, s); return nil }
 
-// turnList implements flag.Value for repeatable --turn url,user,pass flags.
 type turnList []icewrap.TURNServer
 
 func (l *turnList) String() string {
@@ -102,12 +171,4 @@ func (l *turnList) Set(s string) error {
 	}
 	*l = append(*l, icewrap.TURNServer{URL: parts[0], Username: parts[1], Password: parts[2]})
 	return nil
-}
-
-func parsePort(s string) (uint16, error) {
-	n, err := strconv.ParseUint(strings.TrimSpace(s), 10, 16)
-	if err != nil || n == 0 {
-		return 0, fmt.Errorf("invalid port %q", s)
-	}
-	return uint16(n), nil
 }

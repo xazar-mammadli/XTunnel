@@ -46,7 +46,6 @@ func TestRoundTrip(t *testing.T) {
 }
 
 func TestBlobSize(t *testing.T) {
-	// Typical dual-stack machine: 2 host IPv4 + 1 srflx IPv4 + 1 IPv6.
 	b := &Blob{
 		Candidates: []Candidate{
 			{Addr: netip.MustParseAddr("192.168.1.10"), Port: 54321},
@@ -105,15 +104,14 @@ func TestDecodeRejectsGarbage(t *testing.T) {
 		"hello",
 		"xt1_",
 		"xt1_!!!!",
-		"xt1_AAAA",                        // too short
-		"xt2_" + sampleBlob().Encode()[4:], // wrong prefix
+		"xt1_AAAA",
+		"xt2_" + sampleBlob().Encode()[4:],
 	}
 	for _, c := range cases {
 		if _, err := Decode(c); err == nil {
 			t.Errorf("Decode(%q) unexpectedly succeeded", c)
 		}
 	}
-	// Wrong version nibble.
 	b := sampleBlob().Encode()
 	raw := []byte(b)
 	if _, err := Decode(string(raw)); err != nil {
@@ -129,7 +127,6 @@ func FuzzDecode(f *testing.F) {
 		if err != nil {
 			return
 		}
-		// Anything that decodes must re-encode to an equivalent blob.
 		b2, err := Decode(b.Encode())
 		if err != nil {
 			t.Fatalf("re-decode failed: %v", err)

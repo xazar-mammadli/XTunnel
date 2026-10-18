@@ -1,19 +1,3 @@
-// Package blob implements the compact copy-paste pairing code used by manual
-// (serverless) mode.
-//
-// Raw layout, base64url-encoded (no padding) behind the "xt1_" prefix:
-//
-//	[1B  version<<4 | flags]   flags bit0: 1 = answer blob
-//	[16B seed]                 ICE ufrag/pwd are HKDF-derived from this
-//	[32B TLS cert SHA-256 fingerprint]
-//	[1B  candidate count]
-//	per candidate:
-//	  [1B  flags]              bit0: 1 = IPv6
-//	  [4B or 16B IP]
-//	  [2B port, big endian]
-//
-// ICE credentials are never transmitted: both sides derive the same values
-// from the seed, which keeps typical blobs under ~120 characters.
 package blob
 
 import (
@@ -28,23 +12,20 @@ import (
 
 	"github.com/pion/ice/v4"
 
-	"github.com/xazar/xtunnel/internal/xcrypto"
+	"github.com/xazar-mammadli/XTunnel/internal/xcrypto"
 )
 
-// Prefix marks (and versions) the printable form of a pairing code.
 const Prefix = "xt1_"
 
 const version = 1
 
 const maxCandidates = 8
 
-// Candidate is one reachable UDP endpoint of the sending peer.
 type Candidate struct {
 	Addr netip.Addr
 	Port uint16
 }
 
-// Blob is one direction of the manual pairing exchange.
 type Blob struct {
 	IsAnswer    bool
 	Seed        [16]byte
@@ -52,15 +33,12 @@ type Blob struct {
 	Candidates  []Candidate
 }
 
-// NewSeed returns 16 bytes of cryptographic randomness.
 func NewSeed() ([16]byte, error) {
 	var s [16]byte
 	_, err := rand.Read(s[:])
 	return s, err
 }
 
-// DeriveICECredentials expands a blob seed into the ICE ufrag (16 chars) and
-// pwd (24 chars). The base64 alphabet is a subset of RFC 8839 ice-char.
 func DeriveICECredentials(seed [16]byte) (ufrag, pwd string, err error) {
 	uk, err := hkdf.Key(sha256.New, seed[:], nil, "xtunnel/ice-ufrag", 12)
 	if err != nil {
@@ -73,7 +51,6 @@ func DeriveICECredentials(seed [16]byte) (ufrag, pwd string, err error) {
 	return base64.RawStdEncoding.EncodeToString(uk), base64.RawStdEncoding.EncodeToString(pk), nil
 }
 
-// Encode renders the printable pairing code.
 func (b *Blob) Encode() string {
 	raw := make([]byte, 0, 50+18*len(b.Candidates))
 	flags := byte(0)
@@ -104,7 +81,6 @@ func (b *Blob) Encode() string {
 	return Prefix + base64.RawURLEncoding.EncodeToString(raw)
 }
 
-// Decode parses a printable pairing code.
 func Decode(s string) (*Blob, error) {
 	s = strings.TrimSpace(s)
 	if !strings.HasPrefix(s, Prefix) {
@@ -156,10 +132,6 @@ func Decode(s string) (*Blob, error) {
 	return b, nil
 }
 
-// PackCandidates converts gathered local ICE candidates into blob form:
-// host + server-reflexive only, de-duplicated, link-local and unspecified
-// addresses dropped, capped at maxCandidates. Loopback is kept so two
-// processes on one machine can pair during testing.
 func PackCandidates(cands []ice.Candidate) []Candidate {
 	seen := make(map[Candidate]bool)
 	var out []Candidate
@@ -190,9 +162,6 @@ func PackCandidates(cands []ice.Candidate) []Candidate {
 	return out
 }
 
-// ToICECandidates converts received blob candidates into remote ICE
-// candidates. All are presented as host type: for connectivity checks the
-// type only influences priority, not reachability.
 func ToICECandidates(cands []Candidate) ([]ice.Candidate, error) {
 	out := make([]ice.Candidate, 0, len(cands))
 	for _, c := range cands {
@@ -200,7 +169,7 @@ func ToICECandidates(cands []Candidate) ([]ice.Candidate, error) {
 			Network:   "udp",
 			Address:   c.Addr.String(),
 			Port:      int(c.Port),
-			Component: ice.ComponentRTP, // component 1; xtunnel uses a single component
+			Component: ice.ComponentRTP,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("candidate %s:%d: %w", c.Addr, c.Port, err)

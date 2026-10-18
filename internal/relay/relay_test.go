@@ -7,16 +7,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xazar/xtunnel/internal/icewrap"
-	"github.com/xazar/xtunnel/internal/peer"
-	"github.com/xazar/xtunnel/internal/relay"
-	"github.com/xazar/xtunnel/internal/xcrypto"
+	"github.com/xazar-mammadli/XTunnel/internal/icewrap"
+	"github.com/xazar-mammadli/XTunnel/internal/peer"
+	"github.com/xazar-mammadli/XTunnel/internal/relay"
+	"github.com/xazar-mammadli/XTunnel/internal/xcrypto"
 )
 
-// TestForcedRelay proves the M5 fallback: with both ICE agents restricted to
-// relay-only candidates, a QUIC session still establishes and carries data
-// through the embedded TURN server. This is the path taken when direct hole
-// punching fails.
 func TestForcedRelay(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
@@ -42,7 +38,7 @@ func TestForcedRelay(t *testing.T) {
 	newRelayOnly := func(cred struct{ URL, User, Pass string }) *icewrap.Endpoint {
 		ep, err := icewrap.New(icewrap.Config{
 			TURNServers: []icewrap.TURNServer{{URL: cred.URL, Username: cred.User, Password: cred.Pass}},
-			RelayOnly:   true, // excludes host/srflx: the only path is the relay
+			RelayOnly:   true,
 		})
 		if err != nil {
 			t.Fatalf("new relay-only endpoint: %v", err)
@@ -54,7 +50,6 @@ func TestForcedRelay(t *testing.T) {
 	a := newRelayOnly(struct{ URL, User, Pass string }{credA.URL, credA.Username, credA.Password})
 	b := newRelayOnly(struct{ URL, User, Pass string }{credB.URL, credB.Username, credB.Password})
 
-	// Gather relay candidates and exchange them.
 	gctx, gcancel := context.WithTimeout(ctx, 15*time.Second)
 	defer gcancel()
 	aCands, err := a.GatherAll(gctx)
@@ -106,7 +101,6 @@ func TestForcedRelay(t *testing.T) {
 	}
 	iceA, iceB := ra.conn, rb.conn
 
-	// Confirm the nominated pair really is relayed.
 	if pair, err := a.SelectedPair(); err == nil && pair != nil {
 		t.Logf("nominated: local=%s remote=%s", pair.Local.Type(), pair.Remote.Type())
 	}
@@ -145,7 +139,6 @@ func TestForcedRelay(t *testing.T) {
 	defer sessions[0].Close()
 	defer sessions[1].Close()
 
-	// Send a message through the relayed QUIC stream.
 	recvCh := make(chan []byte, 1)
 	go func() {
 		st, err := sessions[1].Conn.AcceptStream(ctx)

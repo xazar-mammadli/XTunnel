@@ -11,12 +11,9 @@ import (
 
 	"github.com/quic-go/quic-go"
 
-	"github.com/xazar/xtunnel/internal/xcrypto"
+	"github.com/xazar-mammadli/XTunnel/internal/xcrypto"
 )
 
-// simConn is an in-memory net.PacketConn that delivers each datagram to its
-// peer after a fixed one-way delay, simulating a WAN path. Cross-platform
-// replacement for tc netem in the M1 RTT benchmark.
 type simConn struct {
 	rx     chan simPkt
 	peerRx chan simPkt
@@ -29,7 +26,7 @@ type simConn struct {
 
 	mu           sync.Mutex
 	readDeadline time.Time
-	dlChanged    chan struct{} // closed and replaced on every deadline change
+	dlChanged    chan struct{}
 }
 
 type simPkt struct {
@@ -66,10 +63,6 @@ func (c *simConn) ReadFrom(b []byte) (int, net.Addr, error) {
 
 		select {
 		case pkt := <-c.rx:
-			// Sleep only for delays above OS timer granularity; delivering up
-			// to 1 ms early keeps RTT accuracy while avoiding a per-packet
-			// sleep that would cap receive throughput at a few thousand
-			// packets/s.
 			if d := time.Until(pkt.at); d > time.Millisecond {
 				time.Sleep(d)
 			}
@@ -80,8 +73,6 @@ func (c *simConn) ReadFrom(b []byte) (int, net.Addr, error) {
 		case <-timeout:
 			return 0, nil, os.ErrDeadlineExceeded
 		case <-dlChanged:
-			// Deadline replaced (quic-go uses this to unblock the read loop
-			// on Transport.Close); recompute and wait again.
 		}
 	}
 }
@@ -97,7 +88,6 @@ func (c *simConn) WriteTo(b []byte, _ net.Addr) (int, error) {
 	select {
 	case c.peerRx <- simPkt{data: data, at: time.Now().Add(c.oneWay)}:
 	default:
-		// Queue full: emulate router drop; QUIC loss recovery handles it.
 	}
 	return len(b), nil
 }
@@ -118,12 +108,9 @@ func (c *simConn) SetReadDeadline(t time.Time) error {
 	return nil
 }
 
-func (c *simConn) SetDeadline(t time.Time) error      { return c.SetReadDeadline(t) }
-func (c *simConn) SetWriteDeadline(time.Time) error   { return nil }
+func (c *simConn) SetDeadline(t time.Time) error    { return c.SetReadDeadline(t) }
+func (c *simConn) SetWriteDeadline(time.Time) error { return nil }
 
-// TestQUICSimulatedRTT validates the central M1 bet: with the tuned windows in
-// quicConfig, QUIC sustains high throughput at WAN-like RTT — where pion's
-// userspace SCTP is documented to collapse (~45 Mbps at 100 ms, issue #218).
 func TestQUICSimulatedRTT(t *testing.T) {
 	if testing.Short() {
 		t.Skip("RTT simulation takes several seconds")

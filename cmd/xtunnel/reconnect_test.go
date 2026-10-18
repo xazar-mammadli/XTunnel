@@ -3,31 +3,87 @@ package main
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/xazar/xtunnel/internal/icewrap"
-	"github.com/xazar/xtunnel/internal/mailbox"
-	"github.com/xazar/xtunnel/internal/peer"
-	sig "github.com/xazar/xtunnel/internal/signal"
+	"github.com/xazar-mammadli/XTunnel/internal/icewrap"
+	"github.com/xazar-mammadli/XTunnel/internal/mailbox"
+	"github.com/xazar-mammadli/XTunnel/internal/peer"
+	sig "github.com/xazar-mammadli/XTunnel/internal/signal"
+	"github.com/xazar-mammadli/XTunnel/internal/tunnel"
 )
 
-// buildLoop pairs a mailbox client, runs PAKE, and returns a ready loop.
-func buildLoop(t *testing.T, ctx context.Context, mb *sig.Mailbox, code string, isHost bool) *rendezvousLoop {
+func testOptions() *options {
+	return &options{includeLoopback: true, stun: stringList{}, timeout: 30 * time.Second}
+}
+
+func quietConsole() *console {
+	return &console{out: io.Discard, err: io.Discard}
+}
+
+func startMailbox(t *testing.T) string {
 	t.Helper()
-	sc, err := sig.Secure(ctx, mb, code, isHost, sig.ModeRendezvous)
+	mbSrv := mailbox.New(nil)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", mbSrv.HandleWS)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return "ws://" + strings.TrimPrefix(srv.URL, "http://")
+}
+
+func pairMailboxes(t *testing.T, ctx context.Context, url string) (host, join *sig.Mailbox, code string) {
+	t.Helper()
+	host, nameplate, err := sig.Create(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = host.Close() })
+	join, err = sig.Join(ctx, url, nameplate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = join.Close() })
+	if err := host.WaitPeer(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return host, join, nameplate + "-000000"
+}
+
+func startEcho(t *testing.T) uint16 {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				_, _ = io.Copy(c, c)
+				_ = c.Close()
+			}()
+		}
+	}()
+	return uint16(ln.Addr().(*net.TCPAddr).Port)
+}
+
+func buildLoop(t *testing.T, ctx context.Context, mb *sig.Mailbox, code string, isHost bool) *loop {
+	t.Helper()
+	sc, err := sig.Secure(ctx, mb, code, isHost)
 	if err != nil {
 		t.Fatalf("secure (host=%v): %v", isHost, err)
 	}
-	rf := &rendezvousFlags{includeLoopback: true, stun: stringList{}}
-	return &rendezvousLoop{sc: sc, rf: rf, isHost: isHost}
+	return &loop{sc: sc, o: testOptions(), isHost: isHost, out: quietConsole()}
 }
 
-// pingSession opens a stream on the controlling side and echoes one message on
-// the controlled side, proving the reconnected QUIC session carries data.
 func pingSession(t *testing.T, ctx context.Context, host, join *peer.Session, msg string) {
 	t.Helper()
 	recv := make(chan string, 1)
@@ -58,8 +114,7 @@ func pingSession(t *testing.T, ctx context.Context, host, join *peer.Session, ms
 	}
 }
 
-// doRound runs one round() on both loops concurrently and returns both sessions.
-func doRound(t *testing.T, ctx context.Context, host, join *rendezvousLoop) (hSess, jSess *peer.Session, hEp, jEp *icewrap.Endpoint) {
+func doRound(t *testing.T, ctx context.Context, host, join *loop) (hSess, jSess *peer.Session, hEp, jEp *icewrap.Endpoint) {
 	t.Helper()
 	type res struct {
 		s   *peer.Session
@@ -80,64 +135,104 @@ func doRound(t *testing.T, ctx context.Context, host, join *rendezvousLoop) (hSe
 	return hr.s, jr.s, hr.ep, jr.ep
 }
 
-// TestRendezvousReconnect proves the M6 reconnect protocol: after the first
-// tunnel is established and then dropped, a second round over the SAME mailbox
-// re-establishes a working QUIC session — no re-pairing, no new room code.
 func TestRendezvousReconnect(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	hostMB, joinMB, code := pairMailboxes(t, ctx, startMailbox(t))
 
-	mbSrv := mailbox.New(nil)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", mbSrv.HandleWS)
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-	url := "ws://" + strings.TrimPrefix(srv.URL, "http://")
-
-	hostMB, err := sig.DialMailbox(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer hostMB.Close()
-	code, err := hostMB.CreateRoom(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	joinMB, err := sig.DialMailbox(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer joinMB.Close()
-	if err := joinMB.JoinRoom(ctx, code); err != nil {
-		t.Fatal(err)
-	}
-	if err := hostMB.WaitPeer(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	// PAKE runs once, concurrently on both sides.
-	type loopRes struct {
-		l *rendezvousLoop
-	}
-	hlCh := make(chan *rendezvousLoop, 1)
+	hlCh := make(chan *loop, 1)
 	go func() { hlCh <- buildLoop(t, ctx, hostMB, code, true) }()
 	joinLoop := buildLoop(t, ctx, joinMB, code, false)
 	hostLoop := <-hlCh
 
-	// Round 1.
 	h1, j1, hEp1, jEp1 := doRound(t, ctx, hostLoop, joinLoop)
 	pingSession(t, ctx, h1, j1, "round-1-hello")
-	t.Log("round 1 established and verified")
-
-	// Simulate a path drop.
 	_ = h1.Close()
 	_ = j1.Close()
 	_ = hEp1.Close()
 	_ = jEp1.Close()
 
-	// Round 2 over the same mailbox — this is the auto-reconnect path.
 	h2, j2, hEp2, jEp2 := doRound(t, ctx, hostLoop, joinLoop)
 	defer func() { _ = h2.Close(); _ = j2.Close(); _ = hEp2.Close(); _ = jEp2.Close() }()
 	pingSession(t, ctx, h2, j2, "round-2-after-reconnect")
-	t.Log("round 2 (reconnect) established and verified")
+}
+
+func TestSignaledShareConnect(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	hostMB, joinMB, code := pairMailboxes(t, ctx, startMailbox(t))
+	echoPort := startEcho(t)
+	o := testOptions()
+	o.noRetry = true
+
+	hostCtx, stopHost := context.WithCancel(ctx)
+	defer stopHost()
+	hostErr := make(chan error, 1)
+	go func() {
+		hostErr <- runSignaled(hostCtx, hostMB, code, true, o, quietConsole(), func(ctx context.Context, s *peer.Session) error {
+			return serveHost(ctx, s, []uint16{echoPort}, quietConsole())
+		})
+	}()
+
+	err := runSignaled(ctx, joinMB, code, false, o, quietConsole(), func(ctx context.Context, s *peer.Session) error {
+		defer s.Close()
+		j, err := tunnel.StartJoin(ctx, s.Conn, []tunnel.Forward{{Listen: "127.0.0.1:0", Port: echoPort}}, nil)
+		if err != nil {
+			return err
+		}
+		defer j.Close()
+		c, err := net.Dial("tcp", j.Addrs()[0].String())
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		if _, err := c.Write([]byte("ping")); err != nil {
+			return err
+		}
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(c, buf); err != nil {
+			return err
+		}
+		if string(buf) != "ping" {
+			t.Fatalf("echo mismatch: %q", buf)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("connect side: %v", err)
+	}
+	stopHost()
+	if err := <-hostErr; err != nil {
+		t.Fatalf("share side: %v", err)
+	}
+}
+
+func TestEarlyOpenerIsNotDropped(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	hostMB, joinMB, code := pairMailboxes(t, ctx, startMailbox(t))
+
+	hlCh := make(chan *loop, 1)
+	go func() { hlCh <- buildLoop(t, ctx, hostMB, code, true) }()
+	joinLoop := buildLoop(t, ctx, joinMB, code, false)
+	hostLoop := <-hlCh
+
+	type res struct {
+		s   *peer.Session
+		ep  *icewrap.Endpoint
+		err error
+	}
+	rctx, rcancel := context.WithTimeout(ctx, 15*time.Second)
+	defer rcancel()
+	jCh := make(chan res, 1)
+	go func() { s, ep, err := joinLoop.round(rctx); jCh <- res{s, ep, err} }()
+	time.Sleep(time.Second)
+
+	hs, hep, herr := hostLoop.round(rctx)
+	jr := <-jCh
+	if herr != nil || jr.err != nil {
+		t.Fatalf("an opener sent before the host started its round was lost: host=%v join=%v", herr, jr.err)
+	}
+	defer func() { _ = hs.Close(); _ = jr.s.Close(); _ = hep.Close(); _ = jr.ep.Close() }()
+	pingSession(t, ctx, hs, jr.s, "early-opener")
 }

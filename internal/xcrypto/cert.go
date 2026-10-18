@@ -1,10 +1,3 @@
-// Package xcrypto holds the TLS identity machinery for xtunnel sessions.
-//
-// Each peer generates an ephemeral self-signed certificate; authentication
-// comes from pinning the SHA-256 fingerprint of the peer's leaf certificate,
-// which is delivered out of band (inside the manual pairing blob, or over the
-// PAKE-protected signaling channel in rendezvous mode). The certificate chain
-// itself is never trusted.
 package xcrypto
 
 import (
@@ -21,17 +14,12 @@ import (
 	"time"
 )
 
-// ALPN is the application protocol negotiated on every xtunnel QUIC session.
-// Bump the suffix on incompatible wire-protocol changes.
 const ALPN = "xtunnel/1"
 
-// Fingerprint is the SHA-256 digest of a peer's leaf certificate in DER form.
 type Fingerprint [32]byte
 
 func (f Fingerprint) String() string { return fmt.Sprintf("%x", f[:]) }
 
-// GenerateCert creates an ephemeral self-signed ECDSA P-256 certificate for
-// one tunnel session and returns it with its fingerprint.
 func GenerateCert() (tls.Certificate, Fingerprint, error) {
 	var fp Fingerprint
 
@@ -75,8 +63,6 @@ func GenerateCert() (tls.Certificate, Fingerprint, error) {
 	return cert, fp, nil
 }
 
-// ErrFingerprintMismatch is returned during the TLS handshake when the peer
-// presented a certificate whose digest does not match the pinned fingerprint.
 var ErrFingerprintMismatch = errors.New("peer certificate fingerprint mismatch")
 
 func pinVerifier(expected Fingerprint) func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
@@ -92,22 +78,17 @@ func pinVerifier(expected Fingerprint) func(rawCerts [][]byte, _ [][]*x509.Certi
 	}
 }
 
-// ClientTLS builds the TLS config for the QUIC-dialing side, pinning the
-// remote peer's certificate to expected.
 func ClientTLS(cert tls.Certificate, expected Fingerprint) *tls.Config {
 	return &tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		Certificates:       []tls.Certificate{cert},
-		NextProtos:         []string{ALPN},
-		ServerName:         "xtunnel",
-		InsecureSkipVerify: true, // chain trust replaced by fingerprint pinning below
+		MinVersion:            tls.VersionTLS13,
+		Certificates:          []tls.Certificate{cert},
+		NextProtos:            []string{ALPN},
+		ServerName:            "xtunnel",
+		InsecureSkipVerify:    true,
 		VerifyPeerCertificate: pinVerifier(expected),
 	}
 }
 
-// ServerTLS builds the TLS config for the QUIC-listening side. The client is
-// required to present a certificate, which is pinned to expected (mutual
-// authentication).
 func ServerTLS(cert tls.Certificate, expected Fingerprint) *tls.Config {
 	return &tls.Config{
 		MinVersion:            tls.VersionTLS13,

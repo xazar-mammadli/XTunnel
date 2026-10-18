@@ -1,4 +1,4 @@
-module github.com/xazar/xtunnel
+module github.com/xazar-mammadli/XTunnel
 
 go 1.25.0
 

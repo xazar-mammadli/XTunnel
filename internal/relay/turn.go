@@ -1,13 +1,3 @@
-// Package relay embeds a TURN relay in xtunneld. It provides the fallback
-// path when direct hole punching fails: peers gather relay candidates from
-// this server and QUIC (still end-to-end encrypted) is forwarded as opaque
-// ciphertext through it.
-//
-// Credentials are ephemeral time-windowed TURN-REST credentials (RFC 8489
-// long-term style): a short-lived username (the expiry timestamp) plus an
-// HMAC password derived from a server-held shared secret. Only peers that
-// obtained credentials from the mailbox can use the relay, and they expire
-// automatically.
 package relay
 
 import (
@@ -18,25 +8,17 @@ import (
 	"github.com/pion/logging"
 	"github.com/pion/turn/v5"
 
-	"github.com/xazar/xtunnel/internal/signal"
+	"github.com/xazar-mammadli/XTunnel/internal/signal"
 )
 
-// Config configures the embedded TURN server.
 type Config struct {
-	// PublicIP is the address peers will relay through (the server's public
-	// IPv4). Required.
-	PublicIP string
-	// ListenAddr is the UDP listen address, e.g. ":3478".
-	ListenAddr string
-	// Realm defaults to "xtunnel".
-	Realm string
-	// Secret is the shared HMAC secret for credential generation. Required.
-	Secret string
-	// CredentialTTL is how long issued credentials remain valid. Default 1h.
+	PublicIP      string
+	ListenAddr    string
+	Realm         string
+	Secret        string
 	CredentialTTL time.Duration
 }
 
-// Server is a running embedded TURN relay.
 type Server struct {
 	turn     *turn.Server
 	conn     net.PacketConn
@@ -47,7 +29,6 @@ type Server struct {
 	ttl      time.Duration
 }
 
-// Start binds the UDP listener and starts the TURN server.
 func Start(cfg Config) (*Server, error) {
 	if cfg.PublicIP == "" {
 		return nil, fmt.Errorf("relay: PublicIP is required")
@@ -106,7 +87,6 @@ func Start(cfg Config) (*Server, error) {
 	}, nil
 }
 
-// Issue mints one set of ephemeral TURN credentials for a peer.
 func (s *Server) Issue(_ time.Duration) (signal.TURNCred, bool) {
 	username, password, err := turn.GenerateLongTermCredentials(s.secret, s.ttl)
 	if err != nil {
@@ -119,11 +99,8 @@ func (s *Server) Issue(_ time.Duration) (signal.TURNCred, bool) {
 	}, true
 }
 
-// Port returns the UDP port the relay is listening on (useful when :0 was
-// requested in tests).
 func (s *Server) Port() int { return s.port }
 
-// Close stops the TURN server and releases the socket.
 func (s *Server) Close() error {
 	err := s.turn.Close()
 	_ = s.conn.Close()

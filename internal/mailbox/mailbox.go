@@ -1,7 +1,5 @@
 package mailbox
 
-// Package mailbox implements the xtunneld room registry and relay.
-
 import (
 	"context"
 	"encoding/json"
@@ -15,20 +13,19 @@ import (
 	"github.com/coder/websocket"
 	"golang.org/x/time/rate"
 
-	"github.com/xazar/xtunnel/internal/signal"
+	"github.com/xazar-mammadli/XTunnel/internal/signal"
 )
 
 const (
-	// unpairedTTL is how long a room waits for its second peer.
-	unpairedTTL = 10 * time.Minute
-	// pairedTTL caps the total lifetime of a room (signaling only; the
-	// P2P tunnel itself outlives the room).
-	pairedTTL    = 24 * time.Hour
-	writeTimeout = 15 * time.Second
-	maxMsgSize   = 1 << 20
+	unpairedTTL        = 10 * time.Minute
+	pairedTTL          = 24 * time.Hour
+	writeTimeout       = 15 * time.Second
+	maxMsgSize         = 1 << 20
+	maxNameplateTries  = 64
+	limiterBurst       = 20
+	limiterReplenishes = 3 * time.Second
 )
 
-// peerSlot is one side of a room.
 type peerSlot struct {
 	ws     *websocket.Conn
 	sendMu sync.Mutex
@@ -51,17 +48,14 @@ type room struct {
 	created time.Time
 
 	mu     sync.Mutex
-	slots  [2]*peerSlot // 0 = creator (host), 1 = joiner
+	slots  [2]*peerSlot
 	burned bool
 }
 
-// TURNIssuer mints ephemeral relay credentials for peers. Implemented by
-// internal/relay; nil when the server runs without an embedded relay.
 type TURNIssuer interface {
 	Issue(ttl time.Duration) (signal.TURNCred, bool)
 }
 
-// mailbox is the in-memory room registry. Nothing is ever persisted.
 type Server struct {
 	mu    sync.Mutex
 	rooms map[string]*room
@@ -72,7 +66,6 @@ type Server struct {
 	turn TURNIssuer
 }
 
-// New builds a mailbox. issuer may be nil (no relay fallback offered).
 func New(issuer TURNIssuer) *Server {
 	m := &Server{
 		rooms:    make(map[string]*room),
@@ -83,7 +76,6 @@ func New(issuer TURNIssuer) *Server {
 	return m
 }
 
-// turnCreds returns freshly issued relay credentials, or nil if no relay.
 func (m *Server) turnCreds() []signal.TURNCred {
 	if m.turn == nil {
 		return nil
@@ -95,14 +87,12 @@ func (m *Server) turnCreds() []signal.TURNCred {
 	return []signal.TURNCred{cred}
 }
 
-// limiter returns the per-IP rate limiter for room create/join operations.
 func (m *Server) limiter(ip string) *rate.Limiter {
 	m.limMu.Lock()
 	defer m.limMu.Unlock()
 	l, ok := m.limiters[ip]
 	if !ok {
-		// Burst 20, then one operation per 3 seconds.
-		l = rate.NewLimiter(rate.Every(3*time.Second), 20)
+		l = rate.NewLimiter(rate.Every(limiterReplenishes), limiterBurst)
 		m.limiters[ip] = l
 	}
 	return l
@@ -112,9 +102,6 @@ func (m *Server) janitor() {
 	for range time.Tick(time.Minute) {
 		now := time.Now()
 
-		// Collect expired rooms' sockets under the lock, but never perform the
-		// (potentially blocking) WebSocket close while holding m.mu — an
-		// unresponsive client would otherwise freeze all signaling.
 		var toClose []*peerSlot
 		m.mu.Lock()
 		for code, r := range m.rooms {
@@ -139,13 +126,12 @@ func (m *Server) janitor() {
 		m.mu.Unlock()
 
 		for _, s := range toClose {
-			_ = s.ws.CloseNow() // no close handshake — janitor must not block
+			_ = s.ws.CloseNow()
 		}
 
-		// Trim the limiter map so idle IPs do not accumulate forever.
 		m.limMu.Lock()
 		for ip, l := range m.limiters {
-			if l.Tokens() >= 20 {
+			if l.Tokens() >= limiterBurst {
 				delete(m.limiters, ip)
 			}
 		}
@@ -161,10 +147,9 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-// handleWS serves one signaling connection for its whole lifetime.
 func (m *Server) HandleWS(w http.ResponseWriter, req *http.Request) {
 	ws, err := websocket.Accept(w, req, &websocket.AcceptOptions{
-		OriginPatterns: []string{"*"}, // clients are CLIs, not browsers
+		OriginPatterns: []string{"*"},
 	})
 	if err != nil {
 		return
@@ -174,57 +159,53 @@ func (m *Server) HandleWS(w http.ResponseWriter, req *http.Request) {
 	ctx := req.Context()
 	defer ws.CloseNow()
 
-	// First envelope decides everything: create or join.
 	first, err := readEnvelope(ctx, ws, 30*time.Second)
 	if err != nil {
 		return
 	}
 
-	ip := clientIP(req)
 	switch first.Type {
-	case "create":
-		if !m.limiter(ip).Allow() {
+	case "create", "join":
+		if !m.limiter(clientIP(req)).Allow() {
 			_ = slot.send(ctx, &signal.Envelope{Type: "error", Err: "rate limited"})
 			return
 		}
-		m.serveCreator(ctx, slot)
-	case "join":
-		if !m.limiter(ip).Allow() {
-			_ = slot.send(ctx, &signal.Envelope{Type: "error", Err: "rate limited"})
-			return
-		}
-		m.serveJoiner(ctx, slot, first.Room)
 	default:
 		_ = slot.send(ctx, &signal.Envelope{Type: "error", Err: "expected create or join"})
+		return
 	}
+	if first.Type == "create" {
+		m.serveCreator(ctx, slot)
+		return
+	}
+	m.serveJoiner(ctx, slot, first.Room)
 }
 
 func (m *Server) serveCreator(ctx context.Context, slot *peerSlot) {
-	// The server assigns only a routing nameplate. The secret words that make
-	// up the PAKE password are generated client-side and never reach here, so
-	// the server cannot derive the session key or MITM the tunnel.
 	var code string
 	var r *room
 	m.mu.Lock()
-	for {
-		c, err := signal.NewNameplate()
+	for attempt := 0; attempt < maxNameplateTries && r == nil; attempt++ {
+		c, err := signal.NewNameplate(attempt)
 		if err != nil {
-			m.mu.Unlock()
-			_ = slot.send(ctx, &signal.Envelope{Type: "error", Err: "internal error"})
-			return
+			break
 		}
 		if _, taken := m.rooms[c]; !taken {
 			code = c
 			r = &room{code: c, created: time.Now()}
 			r.slots[0] = slot
 			m.rooms[c] = r
-			break
 		}
 	}
 	m.mu.Unlock()
+	if r == nil {
+		_ = slot.send(ctx, &signal.Envelope{Type: "error", Err: "no free room, try again"})
+		return
+	}
 	log.Printf("room %s created", code)
 
-	if err := slot.send(ctx, &signal.Envelope{Type: "created", Room: code, TURN: m.turnCreds()}); err != nil {
+	created := &signal.Envelope{Type: "created", Room: code, TURN: m.turnCreds(), Reconnect: true}
+	if err := slot.send(ctx, created); err != nil {
 		m.dropPeer(code, r, 0)
 		return
 	}
@@ -262,11 +243,11 @@ func (m *Server) serveJoiner(ctx context.Context, slot *peerSlot, code string) {
 	}
 	log.Printf("room %s paired", code)
 
-	host := r.peer(0)
-	if host != nil {
+	if host := r.peer(0); host != nil {
 		_ = host.send(ctx, &signal.Envelope{Type: "peer"})
 	}
-	if err := slot.send(ctx, &signal.Envelope{Type: "joined", TURN: m.turnCreds()}); err != nil {
+	joined := &signal.Envelope{Type: "joined", TURN: m.turnCreds(), Reconnect: true}
+	if err := slot.send(ctx, joined); err != nil {
 		m.dropPeer(code, r, 1)
 		return
 	}
@@ -279,8 +260,6 @@ func (r *room) peer(i int) *peerSlot {
 	return r.slots[i]
 }
 
-// relayLoop forwards opaque msg envelopes to the other slot until the
-// connection dies.
 func (m *Server) relayLoop(ctx context.Context, code string, r *room, idx int, slot *peerSlot) {
 	defer m.dropPeer(code, r, idx)
 	for {
@@ -289,7 +268,7 @@ func (m *Server) relayLoop(ctx context.Context, code string, r *room, idx int, s
 			return
 		}
 		if env.Type != "msg" {
-			continue // only relaying is supported after setup
+			continue
 		}
 		other := r.peer(1 - idx)
 		if other == nil {
@@ -303,28 +282,22 @@ func (m *Server) relayLoop(ctx context.Context, code string, r *room, idx int, s
 	}
 }
 
-// dropPeer detaches one slot; the room dies when both slots are gone, and
-// the remaining peer is told immediately.
 func (m *Server) dropPeer(code string, r *room, idx int) {
 	r.mu.Lock()
-	if r.slots[idx] != nil {
-		r.slots[idx] = nil
-	}
+	r.slots[idx] = nil
 	other := r.slots[1-idx]
-	empty := other == nil
 	r.mu.Unlock()
 
 	if other != nil {
 		_ = other.send(context.Background(), &signal.Envelope{Type: "peer-left"})
+		return
 	}
-	if empty {
-		m.mu.Lock()
-		if m.rooms[code] == r {
-			delete(m.rooms, code)
-			log.Printf("room %s closed", code)
-		}
-		m.mu.Unlock()
+	m.mu.Lock()
+	if m.rooms[code] == r {
+		delete(m.rooms, code)
+		log.Printf("room %s closed", code)
 	}
+	m.mu.Unlock()
 }
 
 func readEnvelope(ctx context.Context, ws *websocket.Conn, timeout time.Duration) (*signal.Envelope, error) {

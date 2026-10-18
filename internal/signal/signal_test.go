@@ -3,17 +3,17 @@ package signal_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/xazar/xtunnel/internal/mailbox"
-	"github.com/xazar/xtunnel/internal/signal"
+	"github.com/xazar-mammadli/XTunnel/internal/mailbox"
+	"github.com/xazar-mammadli/XTunnel/internal/signal"
 )
 
-// startServer runs the real xtunneld mailbox on an httptest listener.
 func startServer(t *testing.T) string {
 	t.Helper()
 	mb := mailbox.New(nil)
@@ -24,287 +24,230 @@ func startServer(t *testing.T) string {
 	return "ws://" + strings.TrimPrefix(srv.URL, "http://")
 }
 
-// pairedBoxes creates a room and joins it, returning both mailbox clients.
 func pairedBoxes(t *testing.T, ctx context.Context, url string) (host, join *signal.Mailbox, code string) {
 	t.Helper()
-	h, err := signal.DialMailbox(ctx, url)
+	h, nameplate, err := signal.Create(ctx, url)
 	if err != nil {
-		t.Fatalf("dial host: %v", err)
+		t.Fatalf("create: %v", err)
 	}
 	t.Cleanup(func() { _ = h.Close() })
-	code, err = h.CreateRoom(ctx)
-	if err != nil {
-		t.Fatalf("create room: %v", err)
+	if !signal.ValidNameplate(nameplate) {
+		t.Fatalf("server assigned invalid nameplate %q", nameplate)
 	}
-	if !signal.ValidNameplate(code) {
-		t.Fatalf("generated nameplate %q fails validation", code)
+	if !h.Reconnect() {
+		t.Fatal("xtunneld should advertise reconnect support")
 	}
 
-	j, err := signal.DialMailbox(ctx, url)
+	j, err := signal.Join(ctx, url, nameplate)
 	if err != nil {
-		t.Fatalf("dial join: %v", err)
+		t.Fatalf("join: %v", err)
 	}
 	t.Cleanup(func() { _ = j.Close() })
-	if err := j.JoinRoom(ctx, code); err != nil {
-		t.Fatalf("join room: %v", err)
-	}
 	if err := h.WaitPeer(ctx); err != nil {
 		t.Fatalf("wait peer: %v", err)
 	}
-	return h, j, code
+	return h, j, nameplate + "-123456"
 }
 
-// TestSecureChannelExchange runs the full PAKE + AEAD flow through the real
-// mailbox server and exchanges typed frames both ways.
-func TestSecureChannelExchange(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	url := startServer(t)
-	h, j, code := pairedBoxes(t, ctx, url)
+type secured struct {
+	sc  *signal.SecureChannel
+	err error
+}
 
-	type res struct {
-		sc  *signal.SecureChannel
-		err error
-	}
-	hCh := make(chan res, 1)
+func secureBoth(ctx context.Context, h, j *signal.Mailbox, hostCode, joinCode string) (host, join secured) {
+	ch := make(chan secured, 1)
 	go func() {
-		sc, err := signal.Secure(ctx, h, code, true, signal.ModeRendezvous)
-		hCh <- res{sc, err}
+		sc, err := signal.Secure(ctx, h, hostCode, true)
+		ch <- secured{sc, err}
 	}()
-	scJ, err := signal.Secure(ctx, j, code, false, signal.ModeRendezvous)
-	if err != nil {
-		t.Fatalf("join secure: %v", err)
-	}
-	hr := <-hCh
-	if hr.err != nil {
-		t.Fatalf("host secure: %v", hr.err)
-	}
-	scH := hr.sc
+	sc, err := signal.Secure(ctx, j, joinCode, false)
+	return <-ch, secured{sc, err}
+}
 
-	// Host -> join hello.
-	want := &signal.Hello{FP: "aabb", Ufrag: "ufragH", Pwd: "pwdH"}
-	if err := scH.Send(ctx, signal.MsgHello, want); err != nil {
-		t.Fatal(err)
-	}
-	typ, raw, err := scJ.Recv(ctx)
+func recvHello(t *testing.T, ctx context.Context, sc *signal.SecureChannel) signal.Hello {
+	t.Helper()
+	typ, raw, err := sc.Recv(ctx)
 	if err != nil {
-		t.Fatalf("join recv: %v", err)
+		t.Fatalf("recv: %v", err)
 	}
 	if typ != signal.MsgHello {
 		t.Fatalf("got frame type %q", typ)
 	}
-	var got signal.Hello
-	if err := json.Unmarshal(raw, &got); err != nil {
+	var h signal.Hello
+	if err := json.Unmarshal(raw, &h); err != nil {
 		t.Fatal(err)
 	}
-	if got.FP != want.FP || got.Ufrag != want.Ufrag || got.Pwd != want.Pwd {
-		t.Fatalf("hello mismatch: %+v != %+v", got, *want)
+	return h
+}
+
+func TestSecureChannelExchange(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	h, j, code := pairedBoxes(t, ctx, startServer(t))
+	host, join := secureBoth(ctx, h, j, code, code)
+	if host.err != nil || join.err != nil {
+		t.Fatalf("secure: host=%v join=%v", host.err, join.err)
 	}
 
-	// Join -> host: several candidate frames, exercising the nonce counter.
-	sent := []string{"candidate:1 1 udp 2130706431 10.0.0.1 5000 typ host", "candidate:2 1 udp 1 8.8.8.8 6000 typ srflx", ""}
-	for _, c := range sent[:2] {
-		if err := scJ.Send(ctx, signal.MsgCand, &signal.Cand{C: c}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := scJ.Send(ctx, signal.MsgCand, &signal.Cand{End: true}); err != nil {
+	want := signal.Hello{FP: "aabb", Ufrag: "ufragH", Pwd: "pwdH", Cands: []string{"candidate:1 1 udp 2130706431 10.0.0.1 5000 typ host"}}
+	if err := host.sc.Send(ctx, signal.MsgHello, &want); err != nil {
 		t.Fatal(err)
 	}
+	if got := recvHello(t, ctx, join.sc); got.FP != want.FP || got.Ufrag != want.Ufrag || len(got.Cands) != 1 {
+		t.Fatalf("hello mismatch: %+v != %+v", got, want)
+	}
+
 	for i := 0; i < 3; i++ {
-		typ, raw, err := scH.Recv(ctx)
-		if err != nil {
-			t.Fatalf("host recv %d: %v", i, err)
-		}
-		if typ != signal.MsgCand {
-			t.Fatalf("frame %d: type %q", i, typ)
-		}
-		var c signal.Cand
-		if err := json.Unmarshal(raw, &c); err != nil {
+		rid := string(rune('a' + i))
+		if err := join.sc.Send(ctx, signal.MsgHello, &signal.Hello{Rid: rid}); err != nil {
 			t.Fatal(err)
 		}
-		if i < 2 && c.C != sent[i] {
-			t.Fatalf("candidate %d mismatch: %q != %q", i, c.C, sent[i])
-		}
-		if i == 2 && !c.End {
-			t.Fatalf("frame 2 should be End marker")
+		if got := recvHello(t, ctx, host.sc); got.Rid != rid {
+			t.Fatalf("frame %d: rid %q, want %q", i, got.Rid, rid)
 		}
 	}
 }
 
-// TestSecureChannelWrongCode proves that mismatched room codes derive
-// different PAKE keys, so the first decrypt fails and pairing aborts —
-// the property that keeps a malicious server to one online guess.
 func TestSecureChannelWrongCode(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	url := startServer(t)
-	h, j, code := pairedBoxes(t, ctx, url)
-
-	type res struct {
-		sc  *signal.SecureChannel
-		err error
-	}
-	hCh := make(chan res, 1)
-	go func() {
-		sc, err := signal.Secure(ctx, h, code, true, signal.ModeRendezvous)
-		hCh <- res{sc, err}
-	}()
-	// Joiner uses a DIFFERENT code than the host.
-	scJ, jerr := signal.Secure(ctx, j, code+"-wrong", false, signal.ModeRendezvous)
-	hr := <-hCh
-
-	// PAKE derives keys regardless; the mismatch must surface no later than
-	// the first authenticated frame. Send a hello from the host and require
-	// the joiner's Recv (or its Secure) to fail.
-	if jerr != nil {
-		return // failed already during PAKE confirmation — acceptable
-	}
-	if hr.err != nil {
+	h, j, code := pairedBoxes(t, ctx, startServer(t))
+	host, join := secureBoth(ctx, h, j, code, signal.Nameplate(code)+"-654321")
+	if host.err != nil || join.err != nil {
 		return
 	}
-	if err := hr.sc.Send(ctx, signal.MsgHello, &signal.Hello{FP: "aa"}); err != nil {
+	if err := host.sc.Send(ctx, signal.MsgHello, &signal.Hello{FP: "aa"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := scJ.Recv(ctx); err == nil {
-		t.Fatal("joiner decrypted a frame despite using the wrong room code")
+	_, _, err := join.sc.Recv(ctx)
+	if !errors.Is(err, signal.ErrWrongCode) {
+		t.Fatalf("expected ErrWrongCode, got %v", err)
+	}
+	if !errors.Is(join.sc.Err(), signal.ErrWrongCode) {
+		t.Fatalf("channel should be dead with ErrWrongCode, got %v", join.sc.Err())
 	}
 }
 
-// TestSecureDrainDiscardsBufferedFrames locks in the reconnect-desync fix:
-// frames left buffered by an aborted round must be discardable so the next
-// round starts clean.
 func TestSecureDrainDiscardsBufferedFrames(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	url := startServer(t)
-	h, j, code := pairedBoxes(t, ctx, url)
+	h, j, code := pairedBoxes(t, ctx, startServer(t))
+	host, join := secureBoth(ctx, h, j, code, code)
+	if host.err != nil || join.err != nil {
+		t.Fatalf("secure: host=%v join=%v", host.err, join.err)
+	}
 
-	type res struct {
-		sc  *signal.SecureChannel
-		err error
-	}
-	hCh := make(chan res, 1)
-	go func() { sc, err := signal.Secure(ctx, h, code, true, signal.ModeRendezvous); hCh <- res{sc, err} }()
-	scJ, err := signal.Secure(ctx, j, code, false, signal.ModeRendezvous)
-	if err != nil {
-		t.Fatal(err)
-	}
-	hr := <-hCh
-	if hr.err != nil {
-		t.Fatal(hr.err)
-	}
-	scH := hr.sc
-
-	// Host sends three frames the joiner never consumes in-order.
 	for i := 0; i < 3; i++ {
-		if err := scH.Send(ctx, signal.MsgHello, &signal.Hello{Rid: "stale"}); err != nil {
+		if err := host.sc.Send(ctx, signal.MsgHello, &signal.Hello{Rid: "stale"}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// Give the pump time to buffer them, then drain.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, _, ok := scJ.TryRecv(); ok {
-			break // at least one frame arrived
+		if _, _, ok := join.sc.TryRecv(); ok {
+			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("no frame ever buffered")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	scJ.Drain()
+	join.sc.Drain()
 
-	// After draining, a fresh frame must still come through cleanly.
-	if err := scH.Send(ctx, signal.MsgHello, &signal.Hello{Rid: "fresh", Reply: true}); err != nil {
+	if err := host.sc.Send(ctx, signal.MsgHello, &signal.Hello{Rid: "fresh", Reply: true}); err != nil {
 		t.Fatal(err)
 	}
-	// Drain may have raced ahead of the fresh frame; read until we see it.
-	got := ""
-	for got != "fresh" {
-		typ, raw, err := scJ.Recv(ctx)
-		if err != nil {
-			t.Fatalf("recv after drain: %v", err)
+	for {
+		if recvHello(t, ctx, join.sc).Rid == "fresh" {
+			return
 		}
-		if typ != signal.MsgHello {
-			continue
-		}
-		var hh signal.Hello
-		if err := json.Unmarshal(raw, &hh); err != nil {
-			t.Fatal(err)
-		}
-		got = hh.Rid
 	}
 }
 
-// TestJoinNonexistentRoom rejects a well-formed but unknown code.
-func TestJoinNonexistentRoom(t *testing.T) {
+func TestJoinErrors(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	url := startServer(t)
-	j, err := signal.DialMailbox(ctx, url)
+
+	_, err := signal.Join(ctx, url, "42")
+	var se *signal.ServerError
+	if !errors.As(err, &se) || !strings.HasPrefix(se.Msg, "no such room") {
+		t.Fatalf("joining an unknown room: got %v", err)
+	}
+
+	h, nameplate, err := signal.Create(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	j, err := signal.Join(ctx, url, nameplate)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer j.Close()
-	if err := j.JoinRoom(ctx, "42-zebra-comet"); err == nil {
-		t.Fatal("expected error joining a nonexistent room")
+	if _, err := signal.Join(ctx, url, nameplate); !errors.As(err, &se) || se.Msg != "room is full" {
+		t.Fatalf("third peer: got %v", err)
 	}
 }
 
-// TestCodeGeneration checks the nameplate/secret generators against validators
-// and confirms a full code carries the secret words the server never sees.
-func TestCodeGeneration(t *testing.T) {
-	for i := 0; i < 200; i++ {
-		np, err := signal.NewNameplate()
+func TestDialErrors(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	busy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "slow down", http.StatusTooManyRequests)
+	}))
+	defer busy.Close()
+	_, _, err := signal.Create(ctx, busy.URL)
+	var de *signal.DialError
+	if !errors.As(err, &de) || de.Status != http.StatusTooManyRequests {
+		t.Fatalf("expected DialError with 429, got %v", err)
+	}
+
+	for _, bad := range []string{"ftp://example.com", "wss://"} {
+		if _, _, err := signal.Create(ctx, bad); err == nil {
+			t.Errorf("Create(%q) should fail", bad)
+		}
+	}
+}
+
+func TestCodes(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 500; i++ {
+		np, err := signal.NewNameplate(i % 16)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !signal.ValidNameplate(np) {
-			t.Fatalf("generated nameplate %q fails ValidNameplate", np)
+			t.Fatalf("nameplate %q fails validation", np)
 		}
-		secret, err := signal.NewSecretWords()
+		secret, err := signal.NewSecret()
 		if err != nil {
 			t.Fatal(err)
 		}
-		full := np + "-" + secret
-		if !signal.ValidCode(full) {
-			t.Fatalf("full code %q fails ValidCode", full)
+		code := np + "-" + secret
+		if !signal.ValidCode(code) {
+			t.Fatalf("code %q fails validation", code)
 		}
-		if signal.Nameplate(full) != np {
-			t.Fatalf("Nameplate(%q) = %q, want %q", full, signal.Nameplate(full), np)
+		if signal.Nameplate(code) != np {
+			t.Fatalf("Nameplate(%q) = %q, want %q", code, signal.Nameplate(code), np)
 		}
-		// The secret words must not be recoverable from the nameplate alone.
-		if signal.ValidNameplate(full) {
-			t.Fatalf("full code %q wrongly accepted as a bare nameplate", full)
+		seen[secret] = true
+	}
+	if len(seen) < 450 {
+		t.Fatalf("only %d distinct secrets out of 500", len(seen))
+	}
+	for _, short := range []string{"0", "1", "999"} {
+		if !signal.ValidNameplate(short) {
+			t.Errorf("ValidNameplate(%q) should be true", short)
 		}
 	}
-	for _, bad := range []string{"", "zebra-comet", "1-Zebra-comet", "abc-a-b", strings.Repeat("1", 70)} {
+	for _, bad := range []string{"", "47", "47-12345", "47-1234567", "a-123456", "123456-123456", "47-12a456", "47 123456"} {
 		if signal.ValidCode(bad) {
 			t.Errorf("ValidCode(%q) should be false", bad)
 		}
 	}
-}
-
-// TestPairingCodeGeneration checks the broker-mode (word-only) code generator.
-func TestPairingCodeGeneration(t *testing.T) {
-	seen := map[string]bool{}
-	for i := 0; i < 200; i++ {
-		c, err := signal.NewPairingCode()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !signal.ValidPairingCode(c) {
-			t.Fatalf("generated pairing code %q fails ValidPairingCode", c)
-		}
-		if seen[c] {
-			t.Fatalf("duplicate pairing code %q — entropy too low", c)
-		}
-		seen[c] = true
-	}
-	for _, bad := range []string{"", "one-two", "42-apple-river", "APPLE-river-cedar-otter", strings.Repeat("a", 100)} {
-		if signal.ValidPairingCode(bad) {
-			t.Errorf("ValidPairingCode(%q) should be false", bad)
-		}
+	if !signal.ValidCode("  47-905183  ") {
+		t.Error("ValidCode should ignore surrounding spaces")
 	}
 }

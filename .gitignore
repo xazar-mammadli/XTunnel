@@ -1,3 +1,6 @@
 /dist/
 *.test
 .DS_Store
+node_modules/
+.wrangler/
+worker-configuration.d.ts

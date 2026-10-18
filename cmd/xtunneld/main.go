@@ -1,12 +1,3 @@
-// Command xtunneld is the self-hosted xtunnel rendezvous server. One process
-// provides three services:
-//
-//   - a WebSocket mailbox (one-time room codes; relays only PAKE/AEAD
-//     ciphertext between paired peers)
-//   - STUN, so peers can discover their public addresses  (milestone M5)
-//   - a TURN relay as fallback when hole punching fails    (milestone M5)
-//
-// It keeps all state in memory and never sees tunnel plaintext.
 package main
 
 import (
@@ -18,8 +9,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/xazar/xtunnel/internal/mailbox"
-	"github.com/xazar/xtunnel/internal/relay"
+	"github.com/xazar-mammadli/XTunnel/internal/mailbox"
+	"github.com/xazar-mammadli/XTunnel/internal/relay"
 )
 
 var appVersion = "dev"
