@@ -42,11 +42,13 @@
 
 ## Install
 
+On Linux and macOS:
+
 ```bash
 curl -fsSL https://xazar-mammadli.github.io/XTunnel/install.sh | sh
 ```
 
-Or download the archive for your system from the [latest release](https://github.com/xazar-mammadli/XTunnel/releases/latest), or run `go install github.com/xazar-mammadli/XTunnel/cmd/xtunnel@latest`.
+On Windows, download the zip for your system from the [latest release](https://github.com/xazar-mammadli/XTunnel/releases/latest). With Go installed, `go install github.com/xazar-mammadli/XTunnel/cmd/xtunnel@latest` works everywhere.
 
 ## Usage
 

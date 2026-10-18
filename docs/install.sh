@@ -37,20 +37,59 @@ fi
 
 tar -xzf "$tmp/$archive" -C "$tmp" ./xtunnel
 
-dir="${XTUNNEL_INSTALL_DIR:-}"
-if [ -z "$dir" ]; then
-  if [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
-    dir=/usr/local/bin
-  else
-    dir="$HOME/.local/bin"
+system=/usr/local/bin
+
+writable() {
+  mkdir -p "$1" 2> /dev/null && [ -w "$1" ]
+}
+
+on_path() {
+  case ":$PATH:" in
+    *":$1:"*) return 0 ;;
+  esac
+  return 1
+}
+
+place() {
+  cp "$tmp/xtunnel" "$1/xtunnel" && chmod 0755 "$1/xtunnel"
+}
+
+dir=""
+if [ -n "${XTUNNEL_INSTALL_DIR:-}" ]; then
+  if ! writable "$XTUNNEL_INSTALL_DIR"; then
+    echo "Can't write to $XTUNNEL_INSTALL_DIR. Choose another folder in XTUNNEL_INSTALL_DIR." >&2
+    exit 1
   fi
+  dir="$XTUNNEL_INSTALL_DIR"
+elif [ -d "$system" ] && [ -w "$system" ]; then
+  dir="$system"
+else
+  for candidate in "$HOME/.local/bin" "$HOME/bin"; do
+    if on_path "$candidate" && writable "$candidate"; then
+      dir="$candidate"
+      break
+    fi
+  done
 fi
-mkdir -p "$dir"
-cp "$tmp/xtunnel" "$dir/xtunnel"
-chmod 0755 "$dir/xtunnel"
+
+if [ -n "$dir" ]; then
+  place "$dir"
+elif command -v sudo > /dev/null 2>&1; then
+  echo "Installing to $system needs administrator rights, so sudo may ask for your password."
+  if ! sudo sh -c "mkdir -p '$system' && cp '$tmp/xtunnel' '$system/xtunnel' && chmod 0755 '$system/xtunnel'"; then
+    echo "Could not install to $system. Run again with XTUNNEL_INSTALL_DIR set to a folder you can write to." >&2
+    exit 1
+  fi
+  dir="$system"
+elif writable "$HOME/.local/bin"; then
+  dir="$HOME/.local/bin"
+  place "$dir"
+else
+  echo "No folder to install into. Run again with XTUNNEL_INSTALL_DIR set to a folder you can write to." >&2
+  exit 1
+fi
 
 echo "Installed XTunnel $("$dir/xtunnel" version) to $dir/xtunnel"
-case ":$PATH:" in
-  *":$dir:"*) ;;
-  *) echo "Add $dir to your PATH to run xtunnel from anywhere." ;;
-esac
+if ! on_path "$dir"; then
+  echo "Add $dir to your PATH to run xtunnel from anywhere."
+fi
