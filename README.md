@@ -1,174 +1,89 @@
-# xtunnel
+<p align="center">
+  <img src="docs/images/icon.png" width="128" height="128" alt="XTunnel icon">
+</p>
 
-Peer-to-peer encrypted TCP port forwarding across NATs. Two machines on
-different networks establish a direct, end-to-end-encrypted tunnel — like
-WebRTC, but for forwarding ports from a terminal.
+<h1 align="center">XTunnel</h1>
 
-- **Direct P2P** via ICE/STUN hole punching; falls back to a relay when hole
-  punching fails.
-- **End-to-end encrypted** with QUIC/TLS 1.3 and certificate-fingerprint
-  pinning. The rendezvous server and relay only ever see ciphertext.
-- **Pair with one short code** through a public signaling broker (no server to
-  run), a self-hosted rendezvous server, or fully offline copy-paste codes.
-- **Single static binary**, no CGo. Runs on Linux, macOS and Windows —
-  x86-64 and arm64.
+<p align="center">
+  Share a TCP port between two machines over an encrypted peer-to-peer tunnel.
+</p>
 
-Built on [pion/ice](https://github.com/pion/ice) for NAT traversal and
-[quic-go](https://github.com/quic-go/quic-go) for the encrypted, multiplexed
-data plane.
+<p align="center">
+  <a href="https://xazar-mammadli.github.io/XTunnel/">Website</a> ·
+  <a href="https://github.com/xazar-mammadli/XTunnel/releases/latest">Download</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/xazar-mammadli/XTunnel/releases/latest"><img src="https://img.shields.io/github/v/release/xazar-mammadli/XTunnel?label=release" alt="Latest release"></a>
+  <a href="https://github.com/xazar-mammadli/XTunnel/actions/workflows/ci.yml"><img src="https://github.com/xazar-mammadli/XTunnel/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-111111" alt="Linux, macOS and Windows">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT"></a>
+</p>
+
+<p align="center">
+  <img src="docs/images/terminal.png" width="820" alt="XTunnel sharing a port on one machine and connecting to it from another">
+</p>
+
+## Features
+
+- **One short code:** `xtunnel share` prints a code like `47-905183`, and `xtunnel connect` with that code reaches the port from anywhere.
+- **Direct:** traffic goes straight between the two machines, through NATs, not through a server.
+- **Encrypted end to end:** QUIC with TLS 1.3, bound to the code, so nobody in between can read or take over the tunnel.
+- **Any TCP port:** databases, web apps, SSH, several ports at once.
+- **Nothing to set up:** a free public relay introduces the two sides. You can also pair offline or host your own.
+- **One small binary** for Linux, macOS and Windows.
+
+## Security
+
+- Traffic is encrypted end to end. The relay only introduces the two sides and can't read or change the tunnel.
+- Codes are one-time: a wrong guess or a second use closes the room.
+- The sharing side only accepts connections to the ports you list, on `127.0.0.1`.
+- No accounts and no tracking.
 
 ## Install
 
-Download a release archive for your platform from the releases page, or build
-from source (Go 1.26+):
-
-```sh
-go install github.com/xazar/xtunnel/cmd/xtunnel@latest
-# for the optional self-hosted server:
-go install github.com/xazar/xtunnel/cmd/xtunneld@latest
+```bash
+curl -fsSL https://xazar-mammadli.github.io/XTunnel/install.sh | sh
 ```
+
+Or download the archive for your system from the [latest release](https://github.com/xazar-mammadli/XTunnel/releases/latest), or run `go install github.com/xazar-mammadli/XTunnel/cmd/xtunnel@latest`.
 
 ## Usage
 
-There are three ways to pair the two sides. All give the same encrypted tunnel;
-they differ only in how the two peers first find each other.
-
-### One-code pairing (no server to run)
-
-The side that shares a port runs `offer` and gets one short code; the other
-runs `answer` with it. Signaling goes through a public pub/sub broker
-(ntfy.sh by default) — you run nothing, and the broker only ever sees
-ciphertext (PAKE keeps it from reading or MITM-ing the tunnel).
-
-```sh
-# Machine A — share local port 5432 (e.g. Postgres):
-$ xtunnel offer --expose 5432
-pairing code — run this on the other machine:
-
-    xtunnel answer apple-river-cedar-otter-maple-delta -L <localport>:5432
-
-# Machine B — forward local port 15432 to A's port 5432:
-$ xtunnel answer apple-river-cedar-otter-maple-delta -L 15432:5432
-```
-
-Now on machine B, `psql -h 127.0.0.1 -p 15432` reaches A's Postgres.
-
-The code is one-time and high-entropy; exchange it reasonably promptly (NAT
-bindings go stale). Point `--signal-url https://your-ntfy` at a different broker
-if you like. This mode has no relay fallback (STUN only); use rendezvous mode
-below if you need to traverse symmetric NATs.
-
-### Offline copy-paste (no network at all for signaling)
-
-Add `--offline` to both sides to exchange two base64 blobs by hand — no broker,
-useful when even a public broker is unreachable:
-
-```sh
-$ xtunnel offer --offline --expose 5432       # prints xt1_… ; paste B's reply back
-$ xtunnel answer --offline xt1_… -L 15432:5432 # prints xt1_… reply to send to A
-```
-
-### Rendezvous mode (self-hosted server)
-
-Run `xtunneld` once on a small VPS, then peers meet via a short room code. The
-server relays only encrypted signaling; the tunnel itself is direct P2P (or
-relayed through the server's built-in TURN when hole punching fails).
-
-```sh
-# On your server (once):
-$ xtunneld --listen :443 --tls-cert cert.pem --tls-key key.pem \
-           --turn-public-ip 203.0.113.7 --turn-secret "$(openssl rand -hex 32)"
-
-# Machine A:
-$ xtunnel host --server wss://tunnel.example.com --expose 5432
-room code — give it to the joining side:
-42731-apple-river-cedar
-
-# Machine B:
-$ xtunnel join 42731-apple-river-cedar --server wss://tunnel.example.com -L 15432:5432
-```
-
-In rendezvous mode the tunnel **auto-reconnects**: if the connection drops, the
-peers re-establish it over the same room without a new code (disable with
-`--retry=false`).
-
-### Forward specs (`-L`)
-
-| Form | Meaning |
+| Command | What it does |
 | --- | --- |
-| `-L 8080` | `127.0.0.1:8080` → peer's port `8080` |
-| `-L 15432:5432` | `127.0.0.1:15432` → peer's port `5432` |
-| `-L 0.0.0.0:8080:80` | `0.0.0.0:8080` → peer's port `80` |
+| `xtunnel share 5432` | shares local port 5432 and prints a one-time code |
+| `xtunnel connect 47-905183` | makes the shared port reachable at `127.0.0.1:5432` |
+| `xtunnel connect 47-905183 15432:5432` | uses local port 15432 instead |
+| `xtunnel share --offline 5432` | pairs by copy-paste, without any server |
 
-Repeat `-L` (and `--expose`) to forward several ports over one tunnel.
+Run `xtunnel help` for every option.
 
-## How it works
+## Self-hosting
 
-```
-                    ┌─────────────┐
-   room code /      │  xtunneld   │   (rendezvous mode only)
-   PAKE handshake   │  mailbox +  │
-        ┌──────────▶│  STUN/TURN  │◀──────────┐
-        │           └─────────────┘           │
-        │            signaling only           │
-   ┌────┴────┐      (ciphertext relay)   ┌────┴────┐
-   │ xtunnel │◀───── direct P2P QUIC ───▶│ xtunnel │
-   │  (host) │       (TLS 1.3, E2E)      │ (joiner)│
-   └─────────┘                           └─────────┘
+The public relay only introduces the two sides: two very strict NATs can't connect through it, and a dropped tunnel needs a new code. For a TURN fallback, automatic reconnect or your own infrastructure, run `xtunneld` or [your own relay on Cloudflare](relay/cloudflare/README.md), and point `--server` at it:
+
+```bash
+xtunneld --listen :443 --tls-cert cert.pem --tls-key key.pem --turn-public-ip 203.0.113.7
+xtunnel share 5432 --server wss://tunnel.example.com
 ```
 
-1. **Pairing.** In broker and rendezvous modes both peers run a PAKE (SPAKE2
-   over P-256) keyed by the code, whose secret is never sent to the broker or
-   server — so a malicious or compromised intermediary cannot derive the
-   session key or MITM the tunnel, and online guessing is bounded to one
-   attempt per code. In offline mode the copy-paste channel is the trust
-   anchor.
-2. **NAT traversal.** Each peer gathers ICE candidates (host, STUN-reflexive,
-   TURN-relay) and they run connectivity checks to find a working path.
-3. **Encryption.** QUIC/TLS 1.3 runs over the chosen path. Each side pins the
-   other's certificate fingerprint (exchanged during pairing), giving mutual
-   authentication. The server and relay only carry ciphertext.
-4. **Data plane.** Each forwarded TCP connection is one QUIC stream, so many
-   connections and multiple ports multiplex over a single tunnel with no
-   head-of-line blocking between them.
+The wire protocol is described in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
-See [docs/PROTOCOL.md](docs/PROTOCOL.md) for wire details.
+## Build from source
 
-## Security notes
-
-- Traffic is end-to-end encrypted; no signaling broker, rendezvous server, or
-  TURN relay can read it, and none can MITM it (PAKE authenticates the code).
-- The public broker only ever sees ciphertext and a rendezvous topic derived
-  from the code (`HKDF(code)`), which is unguessable without the code itself.
-  It does learn both peers' IP addresses, as any signaling service would.
-- Codes are one-time; broker-mode codes are high-entropy (no server-side
-  rate-limiting backs them, so the code alone must resist guessing). Rendezvous
-  room codes additionally expire (~10 min), burn on a failed PAKE, and are
-  per-IP rate-limited by the server.
-- Run `xtunneld` behind TLS (`--tls-cert/--tls-key`, or a reverse proxy) so
-  signaling metadata is encrypted in transit.
-- `--expose` is an allowlist: the host only ever dials the exact ports you name,
-  on `127.0.0.1`.
-
-## Limitations (v1)
-
-- Networks that block UDP entirely have no path (QUIC needs UDP end to end).
-- Broker and offline modes have no relay fallback (STUN only) and no
-  auto-reconnect — a dropped tunnel needs a fresh code. Use rendezvous mode for
-  relay + auto-reconnect.
-- pion/ice has no birthday-paradox probing, so a minority of symmetric-NAT
-  pairs fall back to the relay (rendezvous mode only).
-- The default public broker (ntfy.sh) is a third-party service; override it with
-  `--signal-url` or self-host if you need a reliability/privacy guarantee.
-
-## Development
-
-```sh
-go test ./...            # unit + integration tests
-go vet ./...
-./scripts/build-release.sh   # cross-compile all platforms into dist/
+```bash
+git clone https://github.com/xazar-mammadli/XTunnel.git
+cd XTunnel
+go build ./cmd/xtunnel
 ```
+
+You need Go 1.25 or later. Run the tests with `go test ./...`.
+
+## Contributing
+
+Issues and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Please report security problems privately, as [SECURITY.md](SECURITY.md) describes.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[MIT](LICENSE)

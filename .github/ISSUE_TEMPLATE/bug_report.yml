@@ -1,0 +1,52 @@
+name: Bug report
+description: Something doesn't work as it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to report this. If it is a security problem, please report it privately instead (see the Security tab).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. On machine A: xtunnel share 5432
+        2. On machine B: xtunnel connect 47-905183
+        3. …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: XTunnel version
+      description: The output of `xtunnel version`
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: input
+    id: systems
+    attributes:
+      label: Systems and networks on both sides
+      placeholder: "macOS 26 on home Wi-Fi, Ubuntu 24.04 on a cloud server"
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output with -v
+      description: Run both sides with `-v` and paste the output. Remove IP addresses you'd rather not share.
+      render: text
+  - type: checkboxes
+    id: searched
+    attributes:
+      label: Before you send
+      options:
+        - label: I looked through the existing issues, and this one isn't there yet.
+          required: true

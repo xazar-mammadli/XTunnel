@@ -8,17 +8,34 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  release:
+    name: Release
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
         with:
-          go-version: '1.26'
-      - name: Build release artifacts
-        run: ./scripts/build-release.sh "${GITHUB_REF_NAME}"
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          generate_release_notes: true
+          go-version: stable
+
+      - name: Build
+        run: ./scripts/build-release.sh "$GITHUB_REF_NAME"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          notes=""
+          if [ "$(git cat-file -t "$GITHUB_REF_NAME")" = tag ]; then
+            notes=$(git tag -l --format='%(contents)' "$GITHUB_REF_NAME")
+          fi
+          {
+            if [ -n "$notes" ]; then printf '%s\n\n' "$notes"; fi
+            printf '**Install:** `curl -fsSL https://xazar-mammadli.github.io/XTunnel/install.sh | sh`, or download the archive for your system below.\n\n'
+            printf 'SHA-256:\n\n```\n'
+            cat dist/SHA256SUMS
+            printf '```\n'
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/* --title "XTunnel ${GITHUB_REF_NAME#v}" --notes-file notes.md
