@@ -1,6 +1,6 @@
 module github.com/xazar-mammadli/XTunnel
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/coder/websocket v1.8.15
@@ -11,7 +11,7 @@ require (
 	github.com/quic-go/quic-go v0.60.0
 	github.com/schollz/pake/v3 v3.1.1
 	golang.org/x/crypto v0.54.0
-	golang.org/x/time v0.15.0
+	golang.org/x/time v0.16.0
 )
 
 require (
