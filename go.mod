@@ -9,7 +9,7 @@ require (
 	github.com/pion/stun/v3 v3.1.6
 	github.com/pion/turn/v5 v5.0.12
 	github.com/quic-go/quic-go v0.60.0
-	github.com/schollz/pake/v3 v3.1.1
+	github.com/schollz/pake/v3 v3.2.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/time v0.15.0
 )
