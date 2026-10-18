@@ -36,8 +36,9 @@ Flags:
 
 Examples:
   xtunnel share 5432
+  xtunnel share 5432 8080 3000
   xtunnel connect 47-905183
-  xtunnel connect 47-905183 15432:5432
+  xtunnel connect 47-905183 15432:5432 18080:8080
 `
 
 func main() {

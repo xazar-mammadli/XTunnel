@@ -55,8 +55,9 @@ On Windows, download the zip for your system from the [latest release](https://g
 | Command | What it does |
 | --- | --- |
 | `xtunnel share 5432` | shares local port 5432 and prints a one-time code |
-| `xtunnel connect 47-905183` | makes the shared port reachable at `127.0.0.1:5432` |
-| `xtunnel connect 47-905183 15432:5432` | uses local port 15432 instead |
+| `xtunnel share 5432 8080 3000` | shares several ports with one code |
+| `xtunnel connect 47-905183` | makes every shared port reachable on the same local port |
+| `xtunnel connect 47-905183 15432:5432 18080:8080` | picks the local port for each, and forwards only those |
 | `xtunnel share --offline 5432` | pairs by copy-paste, without any server |
 
 Run `xtunnel help` for every option.
