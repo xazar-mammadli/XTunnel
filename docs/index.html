@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'">
+  <title>XTunnel – free, open-source peer-to-peer port sharing</title>
+  <meta name="description" content="Share a TCP port between two machines with one short code. Free and open source, end-to-end encrypted and direct, on Linux, macOS and Windows.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0e0b14">
+  <link rel="canonical" href="https://xazar-mammadli.github.io/XTunnel/">
+  <link rel="icon" type="image/png" href="images/icon.png">
+  <link rel="stylesheet" href="style.css">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://xazar-mammadli.github.io/XTunnel/">
+  <meta property="og:title" content="XTunnel – free, open-source peer-to-peer port sharing">
+  <meta property="og:description" content="Share a TCP port between two machines with one short code. Free and open source, end-to-end encrypted and direct, on Linux, macOS and Windows.">
+  <meta property="og:image" content="https://xazar-mammadli.github.io/XTunnel/images/terminal.png">
+  <meta property="og:image:alt" content="XTunnel sharing a port on one machine and connecting to it from another">
+  <meta name="twitter:card" content="summary_large_image">
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap bar">
+      <a class="brand" href="#top">
+        <img src="images/icon.png" width="28" height="28" alt="">
+        <span>XTunnel</span>
+      </a>
+      <nav class="nav" aria-label="Main">
+        <a class="nav-section" href="#features">Features</a>
+        <a class="nav-section" href="#security">Security</a>
+        <a class="nav-section" href="#install">Install</a>
+        <a href="https://github.com/xazar-mammadli/XTunnel">GitHub</a>
+        <a class="button small" href="https://github.com/xazar-mammadli/XTunnel/releases/latest">Download</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="wrap">
+        <img class="hero-icon" src="images/icon.png" width="144" height="144" alt="">
+        <h1>XTunnel</h1>
+        <p class="tagline">Share a TCP port between two machines over an encrypted peer-to-peer tunnel.</p>
+        <div class="actions">
+          <a class="button" href="https://github.com/xazar-mammadli/XTunnel/releases/latest">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m-5-5 5 5 5-5M5 20h14"/></svg>
+            Download
+          </a>
+          <a class="button secondary" href="https://github.com/xazar-mammadli/XTunnel">View on GitHub</a>
+        </div>
+        <code class="command">curl -fsSL https://xazar-mammadli.github.io/XTunnel/install.sh | sh</code>
+        <p class="fine">Free and open source · Linux, macOS and Windows</p>
+        <img class="screenshot" src="images/terminal.png" width="1200" height="440" alt="XTunnel sharing a port on one machine and connecting to it from another">
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="wrap">
+        <div class="section-head">
+          <h2 id="features">Features</h2>
+          <p>One command on each machine, and the port is there.</p>
+        </div>
+        <ul class="cards features">
+          <li>
+            <span class="tile" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><rect x="3.5" y="6.5" width="17" height="11" rx="2.5"/><path d="M7.5 12h.01M12 12h.01M16.5 12h.01"/></svg>
+            </span>
+            <h3>One short code</h3>
+            <p><code>xtunnel share</code> prints a code like <code>47-905183</code>; <code>xtunnel connect</code> with it reaches the port from anywhere.</p>
+          </li>
+          <li>
+            <span class="tile" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="2.5"/><circle cx="18.5" cy="12" r="2.5"/><path d="M8 12h8"/></svg>
+            </span>
+            <h3>Direct</h3>
+            <p>Traffic goes straight between the two machines, through NATs, not through a server.</p>
+          </li>
+          <li>
+            <span class="tile" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="9.5" rx="2.5"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/></svg>
+            </span>
+            <h3>Encrypted end to end</h3>
+            <p>QUIC with TLS 1.3, bound to the code, so nobody in between can read or take over the tunnel.</p>
+          </li>
+          <li>
+            <span class="tile" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M9 3.5v4M15 3.5v4M6.5 7.5h11v3a5.5 5.5 0 0 1-11 0ZM12 16v4.5"/></svg>
+            </span>
+            <h3>Any TCP port</h3>
+            <p>Databases, web apps, SSH and more, several ports at once.</p>
+          </li>
+          <li>
+            <span class="tile" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M7 18.5a4 4 0 0 1-.6-7.95A5.5 5.5 0 0 1 17 9.4a4.5 4.5 0 0 1 .5 9.1Z"/></svg>
+            </span>
+            <h3>Nothing to set up</h3>
+            <p>A free public relay introduces the two sides. You can also pair offline or host your own.</p>
+          </li>
+          <li>
+            <span class="tile" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M7.5 10l2.5 2-2.5 2M12.5 14.5h4"/></svg>
+            </span>
+            <h3>One small binary</h3>
+            <p>No accounts and no installers to click through, on Linux, macOS and Windows.</p>
+          </li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section band">
+      <div class="wrap split">
+        <div class="section-head">
+          <h2 id="security">Security</h2>
+          <p>XTunnel opens a path into your machine, so it is careful with it.</p>
+        </div>
+        <ul class="checks">
+          <li>Traffic is encrypted end to end. The relay only introduces the two sides and can’t read or change the tunnel.</li>
+          <li>Codes are one-time: a wrong guess or a second use closes the room.</li>
+          <li>The sharing side only accepts connections to the ports you list, on 127.0.0.1.</li>
+          <li>No accounts and no tracking. The code, the protocol and the relay are open source.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="wrap">
+        <div class="section-head">
+          <h2 id="install">Install</h2>
+          <p>Three steps, and the port is shared.</p>
+        </div>
+        <ol class="cards steps">
+          <li>
+            <h3>Install</h3>
+            <p>Run the command below on both machines. On Windows, download the zip of the <a href="https://github.com/xazar-mammadli/XTunnel/releases/latest">latest release</a>.</p>
+          </li>
+          <li>
+            <h3>Share</h3>
+            <p>On the machine with the service, run <code>xtunnel share 5432</code>. It prints a one-time code.</p>
+          </li>
+          <li>
+            <h3>Connect</h3>
+            <p>On the other machine, run <code>xtunnel connect 47-905183</code>. The port is now at <b>127.0.0.1:5432</b>.</p>
+          </li>
+        </ol>
+        <code class="command install-command">curl -fsSL https://xazar-mammadli.github.io/XTunnel/install.sh | sh</code>
+        <div class="get">
+          <p>XTunnel is free and runs on Linux, macOS and Windows.</p>
+          <a class="button" href="https://github.com/xazar-mammadli/XTunnel/releases/latest">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m-5-5 5 5 5-5M5 20h14"/></svg>
+            Download XTunnel
+          </a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap foot">
+      <p>© 2026 xazar-mammadli. Open source under the <a href="https://github.com/xazar-mammadli/XTunnel/blob/master/LICENSE">MIT license</a>.</p>
+      <nav aria-label="Project">
+        <a href="https://github.com/xazar-mammadli/XTunnel">Source code</a>
+        <a href="https://github.com/xazar-mammadli/XTunnel/releases">Releases</a>
+        <a href="https://github.com/xazar-mammadli/XTunnel/issues">Issues</a>
+      </nav>
+    </div>
+  </footer>
+</body>
+</html>
